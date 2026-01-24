@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="450" height="550" alt="shadowfax-logo" src="https://github.com/user-attachments/assets/6f803a41-e6f7-447d-98c3-c10c727d6704" />
+  <img width="450" height="350" alt="shadowfax-logo" src="https://github.com/user-attachments/assets/6f803a41-e6f7-447d-98c3-c10c727d6704" />
 </p>
 
 # Shadowfax
