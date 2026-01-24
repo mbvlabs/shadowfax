@@ -1,0 +1,130 @@
+package proxy
+
+import (
+	"bytes"
+	"compress/gzip"
+	"io"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strconv"
+	"strings"
+
+	"github.com/andybalholm/brotli"
+)
+
+// Server is a reverse proxy that injects the hot reload script into HTML responses.
+type Server struct {
+	target *url.URL
+	proxy  *httputil.ReverseProxy
+	wsPath string
+}
+
+func NewServer(targetURL string, wsPath string) (*Server, error) {
+	target, err := url.Parse(targetURL)
+	if err != nil {
+		return nil, err
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(target)
+
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.Host = target.Host
+	}
+
+	ps := &Server{
+		target: target,
+		proxy:  proxy,
+		wsPath: wsPath,
+	}
+
+	proxy.ModifyResponse = ps.modifyResponse
+
+	return ps, nil
+}
+
+func (ps *Server) modifyResponse(resp *http.Response) error {
+	contentType := resp.Header.Get("Content-Type")
+	if !IsHTMLResponse(contentType) {
+		return nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return err
+	}
+
+	encoding := resp.Header.Get("Content-Encoding")
+	var decompressed []byte
+
+	switch encoding {
+	case "gzip":
+		gr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		decompressed, err = io.ReadAll(gr)
+		gr.Close()
+		if err != nil {
+			return err
+		}
+	case "br":
+		br := brotli.NewReader(bytes.NewReader(body))
+		decompressed, err = io.ReadAll(br)
+		if err != nil {
+			return err
+		}
+	default:
+		decompressed = body
+	}
+
+	modified := InjectScript(decompressed)
+
+	var finalBody []byte
+	switch encoding {
+	case "gzip":
+		var buf bytes.Buffer
+		gw := gzip.NewWriter(&buf)
+		gw.Write(modified)
+		gw.Close()
+		finalBody = buf.Bytes()
+	case "br":
+		var buf bytes.Buffer
+		bw := brotli.NewWriter(&buf)
+		bw.Write(modified)
+		bw.Close()
+		finalBody = buf.Bytes()
+	default:
+		finalBody = modified
+	}
+
+	resp.Body = io.NopCloser(bytes.NewReader(finalBody))
+	resp.ContentLength = int64(len(finalBody))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(finalBody)))
+
+	return nil
+}
+
+func (ps *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ps.proxy.ServeHTTP(w, r)
+}
+
+func (ps *Server) Handler(wsHandler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check if this is a WebSocket request to our endpoint
+		if r.URL.Path == ps.wsPath && isWebSocketRequest(r) {
+			wsHandler.ServeHTTP(w, r)
+			return
+		}
+		ps.proxy.ServeHTTP(w, r)
+	})
+}
+
+func isWebSocketRequest(r *http.Request) bool {
+	connection := strings.ToLower(r.Header.Get("Connection"))
+	upgrade := strings.ToLower(r.Header.Get("Upgrade"))
+	return strings.Contains(connection, "upgrade") && upgrade == "websocket"
+}
