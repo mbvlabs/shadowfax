@@ -80,6 +80,13 @@ internal/
   watcher/           # File watchers (Go, templ, Tailwind)
 ```
 
+## Acknowledgements
+
+Shadowfax is based on these execellent open-source projects:
+
+- **[Air](https://github.com/cosmtrek/air)** - Live reload for Go apps
+- **[Templier](https://github.com/romshark/templier)** - A Go Templ web frontend development environment that automatically rebuilds the server and reloads the tab.
+
 ## License
 
 MIT
