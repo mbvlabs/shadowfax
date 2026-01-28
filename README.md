@@ -80,6 +80,20 @@ internal/
   watcher/           # File watchers (Go, templ, Tailwind)
 ```
 
+## Contributing
+
+Contributions are welcome! But please open an issue beforehand.
+
+Here's how to get started:
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/amazing-feature`
+3. Make your changes and add tests
+4. Run quality checks: `go vet ./...` and `golangci-lint run`
+5. Commit your changes: `git commit -m 'Add amazing feature'`
+6. Push to the branch: `git push origin feature/amazing-feature`
+7. Open a Pull Request
+
 ## Acknowledgements
 
 Shadowfax is based on these execellent open-source projects:
