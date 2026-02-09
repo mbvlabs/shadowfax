@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -107,7 +108,13 @@ func main() {
 	if err != nil && verbose {
 		fmt.Printf("[shadowfax] Tailwind detection error: %v\n", err)
 	}
+
+	var cssRebuilt chan struct{}
+	var rebuildInProgress atomic.Bool
+
 	if useTailwind {
+		cssRebuilt = make(chan struct{}, 1)
+
 		// Start tailwind watcher
 		wg.Add(1)
 		go func() {
@@ -116,19 +123,51 @@ func main() {
 				Verbose:    verbose,
 				AddProcess: addProcess,
 			}
-			if err := watcher.RunTailwindWatcher(ctx, broadcaster, cfg); err != nil {
+			if err := watcher.RunTailwindWatcher(ctx, cssRebuilt, cfg); err != nil {
 				errChan <- fmt.Errorf("live-tailwind: %w", err)
+			}
+		}()
+
+		// Handle CSS rebuild events from tailwind
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-cssRebuilt:
+					if !rebuildInProgress.Load() {
+						fmt.Println("[shadowfax] CSS rebuilt, broadcasting reload")
+						broadcaster.Broadcast()
+					} else if verbose {
+						fmt.Println("[shadowfax] CSS rebuilt (server restart in progress, skipping broadcast)")
+					}
+				}
 			}
 		}()
 	} else if verbose {
 		fmt.Println("[shadowfax] Tailwind watcher disabled")
 	}
 
+	readyChan := make(chan struct{}, 1)
+
+	// Clear rebuildInProgress when app server is ready
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-readyChan:
+				rebuildInProgress.Store(false)
+			}
+		}
+	}()
+
 	// App server manager
 	appServer := server.NewAppServer(server.Config{
 		AppPort:     appPort,
 		Broadcaster: broadcaster,
 		AddProcess:  addProcess,
+		ReadyChan:   readyChan,
 	})
 	wg.Add(1)
 	go func() {
@@ -147,10 +186,25 @@ func main() {
 			case change := <-templChange:
 				switch change {
 				case watcher.TemplChangeNeedsBrowserReload:
-					fmt.Println("[shadowfax] Template changed, reloading browser")
-					broadcaster.Broadcast()
+					if useTailwind {
+						fmt.Println("[shadowfax] Template changed, triggering CSS rebuild")
+						if err := touchFile("./css/base.css"); err != nil {
+							fmt.Printf("[shadowfax] Warning: could not touch CSS file: %v\n", err)
+							// Fall back to broadcasting directly
+							broadcaster.Broadcast()
+						}
+					} else {
+						fmt.Println("[shadowfax] Template changed, reloading browser")
+						broadcaster.Broadcast()
+					}
 				case watcher.TemplChangeNeedsRestart:
 					fmt.Println("[shadowfax] Template Go code changed, rebuilding")
+					if useTailwind {
+						rebuildInProgress.Store(true)
+						if err := touchFile("./css/base.css"); err != nil && verbose {
+							fmt.Printf("[shadowfax] Warning: could not touch CSS file: %v\n", err)
+						}
+					}
 					select {
 					case rebuildChan <- struct{}{}:
 					default:
@@ -260,4 +314,10 @@ func runProxyServer(
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return server.Shutdown(shutdownCtx)
+}
+
+// touchFile updates the modification time of a file to trigger file watchers.
+func touchFile(path string) error {
+	now := time.Now()
+	return os.Chtimes(path, now, now)
 }
