@@ -7,8 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-
-	"github.com/mbvlabs/shadowfax/internal/reload"
 )
 
 type TailwindConfig struct {
@@ -16,7 +14,7 @@ type TailwindConfig struct {
 	AddProcess func(*exec.Cmd)
 }
 
-func RunTailwindWatcher(ctx context.Context, broadcaster *reload.Broadcaster, cfg TailwindConfig) error {
+func RunTailwindWatcher(ctx context.Context, cssRebuilt chan<- struct{}, cfg TailwindConfig) error {
 	wd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -57,8 +55,10 @@ func RunTailwindWatcher(ctx context.Context, broadcaster *reload.Broadcaster, cf
 
 			// Tailwind outputs "Done in" when it finishes rebuilding
 			if strings.Contains(line, "Done in") {
-				fmt.Println("[shadowfax] CSS rebuilt, broadcasting reload")
-				broadcaster.Broadcast()
+				select {
+				case cssRebuilt <- struct{}{}:
+				default:
+				}
 			}
 		}
 	}()

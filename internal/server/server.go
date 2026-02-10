@@ -18,12 +18,14 @@ type AppServer struct {
 	appPort     string
 	broadcaster *reload.Broadcaster
 	addProcess  func(*exec.Cmd)
+	readyChan   chan<- struct{}
 }
 
 type Config struct {
 	AppPort     string
 	Broadcaster *reload.Broadcaster
 	AddProcess  func(*exec.Cmd)
+	ReadyChan   chan<- struct{}
 }
 
 func NewAppServer(cfg Config) *AppServer {
@@ -34,6 +36,7 @@ func NewAppServer(cfg Config) *AppServer {
 		appPort:     cfg.AppPort,
 		broadcaster: cfg.Broadcaster,
 		addProcess:  cfg.AddProcess,
+		readyChan:   cfg.ReadyChan,
 	}
 }
 
@@ -87,6 +90,12 @@ func (s *AppServer) rebuild(ctx context.Context) error {
 	go func() {
 		healthURL := fmt.Sprintf("http://localhost:%s/", s.appPort)
 		reload.BroadcastWhenHealthy(ctx, healthURL, s.broadcaster)
+		if s.readyChan != nil {
+			select {
+			case s.readyChan <- struct{}{}:
+			default:
+			}
+		}
 	}()
 
 	return nil
