@@ -4,20 +4,27 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/andybalholm/brotli"
 )
 
+const localAssetsPrefix = "/__shadowfax/assets/"
+
 // Server is a reverse proxy that injects the hot reload script into HTML responses.
 type Server struct {
-	target *url.URL
-	proxy  *httputil.ReverseProxy
-	wsPath string
+	target      *url.URL
+	proxy       *httputil.ReverseProxy
+	wsPath      string
+	projectRoot string
 }
 
 func NewServer(targetURL string, wsPath string) (*Server, error) {
@@ -38,6 +45,10 @@ func NewServer(targetURL string, wsPath string) (*Server, error) {
 		target: target,
 		proxy:  proxy,
 		wsPath: wsPath,
+	}
+
+	if wd, err := os.Getwd(); err == nil {
+		ps.projectRoot = wd
 	}
 
 	proxy.ModifyResponse = ps.modifyResponse
@@ -81,7 +92,8 @@ func (ps *Server) modifyResponse(resp *http.Response) error {
 		decompressed = body
 	}
 
-	modified := InjectScript(decompressed)
+	modified := RewriteStylesheetHrefs(decompressed)
+	modified = InjectScript(modified)
 
 	var finalBody []byte
 	switch encoding {
@@ -109,6 +121,9 @@ func (ps *Server) modifyResponse(resp *http.Response) error {
 }
 
 func (ps *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if ps.serveLocalAsset(w, r) {
+		return
+	}
 	ps.proxy.ServeHTTP(w, r)
 }
 
@@ -119,8 +134,96 @@ func (ps *Server) Handler(wsHandler http.Handler) http.Handler {
 			wsHandler.ServeHTTP(w, r)
 			return
 		}
+		if ps.serveLocalAsset(w, r) {
+			return
+		}
 		ps.proxy.ServeHTTP(w, r)
 	})
+}
+
+func (ps *Server) serveLocalAsset(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if !strings.HasPrefix(r.URL.Path, localAssetsPrefix) || ps.projectRoot == "" {
+		return false
+	}
+
+	assetRelativePath := strings.TrimPrefix(r.URL.Path, localAssetsPrefix)
+	localPath, ok := ps.resolveLocalAssetPath(assetRelativePath)
+	if !ok {
+		return false
+	}
+
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		return false
+	}
+
+	contentType := mime.TypeByExtension(filepath.Ext(localPath))
+	if contentType == "" {
+		contentType = http.DetectContentType(content)
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet {
+		_, _ = w.Write(content)
+	}
+	return true
+}
+
+func (ps *Server) resolveLocalAssetPath(assetRelativePath string) (string, bool) {
+	assetsRoot := filepath.Join(ps.projectRoot, "assets")
+	candidates := []string{assetRelativePath}
+
+	parts := strings.Split(strings.Trim(filepath.ToSlash(assetRelativePath), "/"), "/")
+	if len(parts) >= 3 {
+		for i := 1; i < len(parts)-1; i++ {
+			if isCacheBusterSegment(parts[i]) {
+				trimmed := append([]string{}, parts[:i]...)
+				trimmed = append(trimmed, parts[i+1:]...)
+				candidates = append(candidates, strings.Join(trimmed, "/"))
+			}
+		}
+	}
+
+	for _, candidate := range candidates {
+		localPath := filepath.Clean(filepath.Join(assetsRoot, filepath.FromSlash(candidate)))
+		rel, err := filepath.Rel(assetsRoot, localPath)
+		if err != nil {
+			continue
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		info, err := os.Stat(localPath)
+		if err == nil && !info.IsDir() {
+			return localPath, true
+		}
+	}
+
+	return "", false
+}
+
+func isCacheBusterSegment(part string) bool {
+	if part == "" {
+		return false
+	}
+	allDigits := true
+	for _, r := range part {
+		if !unicode.IsDigit(r) {
+			allDigits = false
+			break
+		}
+	}
+	if allDigits && len(part) >= 6 {
+		return true
+	}
+	return false
 }
 
 func isWebSocketRequest(r *http.Request) bool {

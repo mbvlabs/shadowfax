@@ -2,8 +2,11 @@ package proxy
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 )
+
+var stylesheetHrefRegex = regexp.MustCompile(`(?is)<link\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>`)
 
 const HotReloadScript = `<script>
 (function() {
@@ -67,6 +70,91 @@ func InjectScript(content []byte) []byte {
 	}
 
 	return append(content, script...)
+}
+
+func RewriteStylesheetHrefs(content []byte) []byte {
+	return stylesheetHrefRegex.ReplaceAllFunc(content, func(match []byte) []byte {
+		tag := string(match)
+		lowerTag := strings.ToLower(tag)
+		if !strings.Contains(lowerTag, "rel=") || !strings.Contains(lowerTag, "stylesheet") {
+			return match
+		}
+
+		submatches := stylesheetHrefRegex.FindSubmatch(match)
+		if len(submatches) < 2 {
+			return match
+		}
+
+		href := string(submatches[1])
+		rewritten, ok := rewriteStylesheetHref(href)
+		if !ok {
+			return match
+		}
+		return []byte(strings.Replace(tag, href, rewritten, 1))
+	})
+}
+
+func rewriteStylesheetHref(href string) (string, bool) {
+	lowerHref := strings.ToLower(href)
+	if strings.HasPrefix(lowerHref, "http://") || strings.HasPrefix(lowerHref, "https://") || strings.HasPrefix(lowerHref, "//") || strings.HasPrefix(lowerHref, "data:") {
+		return "", false
+	}
+
+	pathPart := href
+	suffix := ""
+	if idx := strings.IndexAny(href, "?#"); idx >= 0 {
+		pathPart = href[:idx]
+		suffix = href[idx:]
+	}
+
+	if pathPart == "" {
+		return "", false
+	}
+
+	normalized := strings.TrimPrefix(pathPart, "./")
+	normalized = normalizeAssetPathForRewrite(normalized)
+	if strings.HasPrefix(normalized, "/__shadowfax/assets/") {
+		return "", false
+	}
+
+	if strings.HasPrefix(normalized, "/assets/") {
+		return "/__shadowfax" + normalized + suffix, true
+	}
+	if strings.HasPrefix(normalized, "assets/") {
+		return "/__shadowfax/" + normalized + suffix, true
+	}
+
+	return "", false
+}
+
+func normalizeAssetPathForRewrite(path string) string {
+	if strings.HasPrefix(path, "/assets/") {
+		return stripCacheBusterSegment(path, "/assets/")
+	}
+	if strings.HasPrefix(path, "assets/") {
+		return stripCacheBusterSegment(path, "assets/")
+	}
+	return path
+}
+
+func stripCacheBusterSegment(path, prefix string) string {
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) < 3 {
+		return path
+	}
+
+	for i := 1; i < len(parts)-1; i++ {
+		if isCacheBusterSegment(parts[i]) {
+			trimmed := append([]string{}, parts[:i]...)
+			trimmed = append(trimmed, parts[i+1:]...)
+			if strings.HasSuffix(path, "/") {
+				return prefix + strings.Join(trimmed, "/") + "/"
+			}
+			return prefix + strings.Join(trimmed, "/")
+		}
+	}
+	return path
 }
 
 func IsHTMLResponse(contentType string) bool {
