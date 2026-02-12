@@ -13,6 +13,7 @@ The development server and hot-reload runner for the [Andurel](https://github.co
 - **Tailwind CSS** - Optional Tailwind CSS watcher that rebuilds and reloads on style changes
 - **Reverse Proxy** - Proxies requests to your app server and injects the hot-reload script into HTML responses
 - **WebSocket-based** - Uses WebSockets for instant browser refresh notifications
+- **Heartbeat Recovery** - Detects consecutive unhealthy app responses and automatically restarts the app process
 
 ## Installation
 

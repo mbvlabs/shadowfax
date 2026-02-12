@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"syscall"
@@ -16,9 +17,11 @@ type AppServer struct {
 	buildCmd    string
 	binPath     string
 	appPort     string
+	healthURL   string
 	broadcaster *reload.Broadcaster
 	addProcess  func(*exec.Cmd)
 	readyChan   chan<- struct{}
+	heartbeat   heartbeatConfig
 }
 
 type Config struct {
@@ -28,23 +31,49 @@ type Config struct {
 	ReadyChan   chan<- struct{}
 }
 
+type heartbeatConfig struct {
+	Interval         time.Duration
+	Timeout          time.Duration
+	FailureThreshold int
+	StartupGrace     time.Duration
+}
+
+func defaultHeartbeatConfig() heartbeatConfig {
+	return heartbeatConfig{
+		Interval:         3 * time.Second,
+		Timeout:          700 * time.Millisecond,
+		FailureThreshold: 3,
+		StartupGrace:     4 * time.Second,
+	}
+}
+
 func NewAppServer(cfg Config) *AppServer {
 	wd, _ := os.Getwd()
 	return &AppServer{
 		buildCmd:    "go build -o tmp/bin/main cmd/app/main.go",
 		binPath:     wd + "/tmp/bin/main",
 		appPort:     cfg.AppPort,
+		healthURL:   fmt.Sprintf("http://localhost:%s/", cfg.AppPort),
 		broadcaster: cfg.Broadcaster,
 		addProcess:  cfg.AddProcess,
 		readyChan:   cfg.ReadyChan,
+		heartbeat:   defaultHeartbeatConfig(),
 	}
 }
 
 func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error {
+	hb := newHeartbeatState(s.heartbeat.FailureThreshold)
+	lastStartedAt := time.Time{}
+
 	// Initial build and start
 	if err := s.rebuild(ctx); err != nil {
 		fmt.Printf("[shadowfax] Initial build failed: %v\n", err)
+	} else {
+		lastStartedAt = time.Now()
 	}
+
+	ticker := time.NewTicker(s.heartbeat.Interval)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -57,6 +86,36 @@ func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error 
 				fmt.Printf("[shadowfax] Build failed: %v\n", err)
 				continue
 			}
+			lastStartedAt = time.Now()
+			hb.Reset()
+		case <-ticker.C:
+			if s.cmd == nil || s.cmd.Process == nil {
+				continue
+			}
+			if !lastStartedAt.IsZero() && time.Since(lastStartedAt) < s.heartbeat.StartupGrace {
+				continue
+			}
+
+			healthy := s.isHealthy(ctx)
+			restart, recovered := hb.Observe(healthy)
+			if recovered {
+				fmt.Println("[shadowfax] Heartbeat recovered")
+			}
+			if !restart {
+				continue
+			}
+
+			fmt.Printf(
+				"[shadowfax] Heartbeat failed %d consecutive checks, restarting app server...\n",
+				s.heartbeat.FailureThreshold,
+			)
+			s.stop()
+			if err := s.rebuild(ctx); err != nil {
+				fmt.Printf("[shadowfax] Build failed during heartbeat recovery: %v\n", err)
+				continue
+			}
+			lastStartedAt = time.Now()
+			hb.Reset()
 		}
 	}
 }
@@ -113,4 +172,24 @@ func (s *AppServer) stop() {
 			s.cmd.Process.Kill()
 		}
 	}
+	s.cmd = nil
+}
+
+func (s *AppServer) isHealthy(ctx context.Context) bool {
+	checkCtx, cancel := context.WithTimeout(ctx, s.heartbeat.Timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodHead, s.healthURL, nil)
+	if err != nil {
+		return false
+	}
+
+	client := &http.Client{Timeout: s.heartbeat.Timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+
+	return resp.StatusCode < http.StatusInternalServerError
 }
