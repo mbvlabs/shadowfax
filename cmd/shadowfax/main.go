@@ -170,6 +170,9 @@ func main() {
 		Broadcaster: broadcaster,
 		AddProcess:  addProcess,
 		ReadyChan:   readyChan,
+		OnRebuildStateChanged: func(inProgress bool) {
+			rebuildInProgress.Store(inProgress)
+		},
 	})
 	wg.Add(1)
 	go func() {
