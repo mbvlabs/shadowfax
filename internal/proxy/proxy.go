@@ -3,9 +3,13 @@ package proxy
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -13,12 +17,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/andybalholm/brotli"
 )
 
 const localAssetsPrefix = "/__shadowfax/assets/"
+const proxyRetryHeader = "X-Shadowfax-Upstream-Retry"
 
 // Server is a reverse proxy that injects the hot reload script into HTML responses.
 type Server struct {
@@ -53,6 +59,7 @@ func NewServer(targetURL string, wsPath string) (*Server, error) {
 	}
 
 	proxy.ModifyResponse = ps.modifyResponse
+	proxy.ErrorHandler = ps.handleProxyError
 
 	return ps, nil
 }
@@ -266,6 +273,93 @@ func (ps *Server) resolveLocalAssetPath(assetRelativePath string) (string, bool)
 	}
 
 	return "", false
+}
+
+func (ps *Server) handleProxyError(w http.ResponseWriter, r *http.Request, err error) {
+	log.Printf("[shadowfax] proxy upstream unavailable: %v", err)
+
+	// Keep websocket handshakes as plain HTTP errors.
+	if isWebSocketRequest(r) {
+		http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// For idempotent navigation requests, do a short optimistic wait/retry
+	// so fast app restarts avoid rendering the fallback page entirely.
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.Header.Get(proxyRetryHeader) == "" {
+		if ps.waitForUpstreamReady(r.Context(), 700*time.Millisecond) {
+			retryReq := r.Clone(r.Context())
+			retryReq.Header = r.Header.Clone()
+			retryReq.Header.Set(proxyRetryHeader, "1")
+			ps.proxy.ServeHTTP(w, retryReq)
+			return
+		}
+	}
+
+	// For normal browser navigation, return a websocket-driven recovery page so
+	// manual hard-refresh is never required during app restart windows.
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		body := fmt.Sprintf(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shadowfax: restarting app...</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 2rem; line-height: 1.45; color: #111827; }
+    code { background: #f3f4f6; padding: 0.1rem 0.35rem; border-radius: 0.25rem; }
+  </style>
+</head>
+<body>
+  <h1>App restarting...</h1>
+  <p>Shadowfax is rebuilding your Go app. This page reconnects and reloads as soon as it is ready.</p>
+  <p><small>Upstream: <code>%s</code></small></p>
+  %s
+  <script>
+    // Fallback in case websocket is unavailable.
+    setInterval(function() {
+      fetch(window.location.href, { method: 'HEAD', cache: 'no-store' })
+        .then(function(resp) {
+          if (resp.ok) window.location.reload();
+        })
+        .catch(function() {});
+    }, 3000);
+  </script>
+</body>
+</html>`, ps.target.String(), HotReloadScript)
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, body)
+		}
+		return
+	}
+
+	http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+}
+
+func (ps *Server) waitForUpstreamReady(ctx context.Context, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	dialer := &net.Dialer{Timeout: 120 * time.Millisecond}
+	for {
+		conn, err := dialer.DialContext(ctx, "tcp", ps.target.Host)
+		if err == nil {
+			_ = conn.Close()
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func isCacheBusterSegment(part string) bool {

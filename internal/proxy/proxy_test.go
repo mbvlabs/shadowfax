@@ -190,3 +190,30 @@ func TestModifyResponseSkipsInjectionForNotModified(t *testing.T) {
 		t.Fatalf("expected 304 response to remain unchanged, got %q", string(body))
 	}
 }
+
+func TestProxyUnavailableReturnsAutoRetryPage(t *testing.T) {
+	ps, err := NewServer("http://127.0.0.1:65535", "/__shadowfax/events")
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	handler := ps.Handler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	req := httptest.NewRequest(http.MethodGet, "http://localhost:3000/", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when upstream is unavailable, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("expected HTML content type, got %q", got)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "App restarting...") {
+		t.Fatalf("expected recovery page body, got %q", body)
+	}
+	if !strings.Contains(body, "window.location.reload()") {
+		t.Fatalf("expected auto-retry script in response body")
+	}
+}

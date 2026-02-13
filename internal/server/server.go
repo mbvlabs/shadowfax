@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 
@@ -12,36 +13,42 @@ import (
 )
 
 type AppServer struct {
-	cmd         *exec.Cmd
-	buildCmd    string
-	binPath     string
-	appPort     string
-	broadcaster *reload.Broadcaster
-	addProcess  func(*exec.Cmd)
-	readyChan   chan<- struct{}
+	cmd                   *exec.Cmd
+	buildCmd              string
+	binPath               string
+	appPort               string
+	broadcaster           *reload.Broadcaster
+	addProcess            func(*exec.Cmd)
+	readyChan             chan<- struct{}
+	onRebuildStateChanged func(bool)
+	healthMu              sync.Mutex
+	healthCancel          context.CancelFunc
 }
 
 type Config struct {
-	AppPort     string
-	Broadcaster *reload.Broadcaster
-	AddProcess  func(*exec.Cmd)
-	ReadyChan   chan<- struct{}
+	AppPort               string
+	Broadcaster           *reload.Broadcaster
+	AddProcess            func(*exec.Cmd)
+	ReadyChan             chan<- struct{}
+	OnRebuildStateChanged func(bool)
 }
 
 func NewAppServer(cfg Config) *AppServer {
 	wd, _ := os.Getwd()
 	return &AppServer{
-		buildCmd:    "go build -o tmp/bin/main cmd/app/main.go",
-		binPath:     wd + "/tmp/bin/main",
-		appPort:     cfg.AppPort,
-		broadcaster: cfg.Broadcaster,
-		addProcess:  cfg.AddProcess,
-		readyChan:   cfg.ReadyChan,
+		buildCmd:              "go build -o tmp/bin/main cmd/app/main.go",
+		binPath:               wd + "/tmp/bin/main",
+		appPort:               cfg.AppPort,
+		broadcaster:           cfg.Broadcaster,
+		addProcess:            cfg.AddProcess,
+		readyChan:             cfg.ReadyChan,
+		onRebuildStateChanged: cfg.OnRebuildStateChanged,
 	}
 }
 
 func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error {
 	// Initial build and start
+	s.setRebuildState(true)
 	if err := s.rebuild(ctx); err != nil {
 		fmt.Printf("[shadowfax] Initial build failed: %v\n", err)
 	}
@@ -50,8 +57,10 @@ func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error 
 		select {
 		case <-ctx.Done():
 			s.stop()
+			s.cancelHealthMonitor()
 			return nil
 		case <-rebuildChan:
+			s.setRebuildState(true)
 			s.stop()
 			if err := s.rebuild(ctx); err != nil {
 				fmt.Printf("[shadowfax] Build failed: %v\n", err)
@@ -86,22 +95,13 @@ func (s *AppServer) rebuild(ctx context.Context) error {
 		s.addProcess(s.cmd)
 	}
 
-	// Wait for healthy, then broadcast
-	go func() {
-		healthURL := fmt.Sprintf("http://localhost:%s/", s.appPort)
-		reload.BroadcastWhenHealthy(ctx, healthURL, s.broadcaster)
-		if s.readyChan != nil {
-			select {
-			case s.readyChan <- struct{}{}:
-			default:
-			}
-		}
-	}()
+	s.startHealthMonitor(ctx)
 
 	return nil
 }
 
 func (s *AppServer) stop() {
+	s.cancelHealthMonitor()
 	if s.cmd != nil && s.cmd.Process != nil {
 		s.cmd.Process.Signal(syscall.SIGTERM)
 		done := make(chan error, 1)
@@ -112,5 +112,44 @@ func (s *AppServer) stop() {
 		case <-time.After(3 * time.Second):
 			s.cmd.Process.Kill()
 		}
+	}
+}
+
+func (s *AppServer) startHealthMonitor(ctx context.Context) {
+	s.cancelHealthMonitor()
+	healthCtx, cancel := context.WithCancel(ctx)
+	s.healthMu.Lock()
+	s.healthCancel = cancel
+	s.healthMu.Unlock()
+
+	go func() {
+		healthURL := fmt.Sprintf("http://localhost:%s/", s.appPort)
+		reload.BroadcastWhenHealthy(healthCtx, healthURL, s.broadcaster)
+		if healthCtx.Err() != nil {
+			return
+		}
+		s.setRebuildState(false)
+		if s.readyChan != nil {
+			select {
+			case s.readyChan <- struct{}{}:
+			default:
+			}
+		}
+	}()
+}
+
+func (s *AppServer) cancelHealthMonitor() {
+	s.healthMu.Lock()
+	cancel := s.healthCancel
+	s.healthCancel = nil
+	s.healthMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *AppServer) setRebuildState(inProgress bool) {
+	if s.onRebuildStateChanged != nil {
+		s.onRebuildStateChanged(inProgress)
 	}
 }
