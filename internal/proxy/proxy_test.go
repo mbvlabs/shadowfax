@@ -1,10 +1,13 @@
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -99,5 +102,84 @@ func TestServeLocalAssetTimestampedPathFallback(t *testing.T) {
 	}
 	if rec.Body.String() != want {
 		t.Fatalf("unexpected body: got %q want %q", rec.Body.String(), want)
+	}
+}
+
+func TestModifyResponseSkipsInjectionForHEAD(t *testing.T) {
+	ps := &Server{}
+	original := "<html><head></head><body>ok</body></html>"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type":   []string{"text/html; charset=utf-8"},
+			"Content-Length": []string{strconv.Itoa(len(original))},
+		},
+		Body:    io.NopCloser(strings.NewReader(original)),
+		Request: httptest.NewRequest(http.MethodHead, "http://example.com", nil),
+	}
+
+	if err := ps.modifyResponse(resp); err != nil {
+		t.Fatalf("modifyResponse returned error: %v", err)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body failed: %v", err)
+	}
+	if string(body) != original {
+		t.Fatalf("expected HEAD response to remain unchanged, got %q", string(body))
+	}
+	if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(original)) {
+		t.Fatalf("expected content-length unchanged, got %q", got)
+	}
+}
+
+func TestModifyResponseSkipsInjectionForNoContent(t *testing.T) {
+	ps := &Server{}
+	original := "<html><head></head><body>ignored</body></html>"
+	resp := &http.Response{
+		StatusCode: http.StatusNoContent,
+		Header: http.Header{
+			"Content-Type":   []string{"text/html; charset=utf-8"},
+			"Content-Length": []string{strconv.Itoa(len(original))},
+		},
+		Body: io.NopCloser(strings.NewReader(original)),
+	}
+
+	if err := ps.modifyResponse(resp); err != nil {
+		t.Fatalf("modifyResponse returned error: %v", err)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body failed: %v", err)
+	}
+	if string(body) != original {
+		t.Fatalf("expected 204 response to remain unchanged, got %q", string(body))
+	}
+}
+
+func TestModifyResponseSkipsInjectionForNotModified(t *testing.T) {
+	ps := &Server{}
+	original := "<html><head></head><body>cached</body></html>"
+	resp := &http.Response{
+		StatusCode: http.StatusNotModified,
+		Header: http.Header{
+			"Content-Type":   []string{"text/html; charset=utf-8"},
+			"Content-Length": []string{strconv.Itoa(len(original))},
+		},
+		Body: io.NopCloser(strings.NewReader(original)),
+	}
+
+	if err := ps.modifyResponse(resp); err != nil {
+		t.Fatalf("modifyResponse returned error: %v", err)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body failed: %v", err)
+	}
+	if string(body) != original {
+		t.Fatalf("expected 304 response to remain unchanged, got %q", string(body))
 	}
 }

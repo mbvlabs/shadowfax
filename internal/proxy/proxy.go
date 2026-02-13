@@ -57,6 +57,10 @@ func NewServer(targetURL string, wsPath string) (*Server, error) {
 }
 
 func (ps *Server) modifyResponse(resp *http.Response) error {
+	if isBodylessResponse(resp) {
+		return nil
+	}
+
 	contentType := resp.Header.Get("Content-Type")
 	if !IsHTMLResponse(contentType) {
 		return nil
@@ -118,6 +122,16 @@ func (ps *Server) modifyResponse(resp *http.Response) error {
 	resp.Header.Set("Content-Length", strconv.Itoa(len(finalBody)))
 
 	return nil
+}
+
+func isBodylessResponse(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	if resp.Request != nil && resp.Request.Method == http.MethodHead {
+		return true
+	}
+	return resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified
 }
 
 func (ps *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
