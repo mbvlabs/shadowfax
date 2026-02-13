@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"net"
 	"os"
 	"sync/atomic"
 	"testing"
@@ -189,5 +191,31 @@ func TestFullRestartCycle(t *testing.T) {
 		// Expected: broadcast succeeds after rebuild cycle completes.
 	case <-time.After(time.Second):
 		t.Fatal("CSS rebuild after restart cycle should broadcast")
+	}
+}
+
+func TestRunProxyServerFailsFastWhenPortInUse(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	start := time.Now()
+	err = runProxyServer(ctx, port, "8080", reload.NewBroadcaster())
+	if err == nil {
+		t.Fatal("expected bind error when proxy port is already in use")
+	}
+
+	if time.Since(start) > time.Second {
+		t.Fatalf("expected startup failure to return quickly, took %s", time.Since(start))
 	}
 }
