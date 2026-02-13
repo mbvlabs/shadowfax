@@ -253,6 +253,7 @@ func main() {
 func addProcess(cmd *exec.Cmd) {
 	processMutex.Lock()
 	defer processMutex.Unlock()
+	compactRunningProcessesLocked()
 	runningProcesses = append(runningProcesses, cmd)
 }
 
@@ -260,8 +261,10 @@ func cleanup() {
 	fmt.Printf("\nCleaning up processes...\n")
 
 	processMutex.Lock()
+	compactRunningProcessesLocked()
 	processes := make([]*exec.Cmd, len(runningProcesses))
 	copy(processes, runningProcesses)
+	runningProcesses = nil
 	processMutex.Unlock()
 
 	// Ask tracked child processes to stop first.
@@ -283,6 +286,27 @@ func cleanup() {
 	}
 
 	fmt.Printf("Cleanup complete.\n")
+}
+
+func compactRunningProcessesLocked() {
+	if len(runningProcesses) == 0 {
+		return
+	}
+
+	compacted := runningProcesses[:0]
+	for _, cmd := range runningProcesses {
+		if cmd == nil || cmd.Process == nil {
+			continue
+		}
+		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+			continue
+		}
+		if !processAlive(cmd.Process) {
+			continue
+		}
+		compacted = append(compacted, cmd)
+	}
+	runningProcesses = compacted
 }
 
 func processAlive(process *os.Process) bool {
