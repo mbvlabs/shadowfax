@@ -25,18 +25,10 @@ func RunGoWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbose bool
 
 	wd, _ := os.Getwd()
 
-	// Recursively add directories
-	filepath.WalkDir(wd, func(path string, d os.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
-			return nil
-		}
-		name := d.Name()
-		if excludeDirs[name] || strings.HasPrefix(name, ".") {
-			return filepath.SkipDir
-		}
-		watcher.Add(path)
-		return nil
-	})
+	// Recursively add directories.
+	if err := addWatchRecursive(watcher, wd); err != nil {
+		return err
+	}
 
 	// Debounce timer
 	var debounceTimer *time.Timer
@@ -46,11 +38,28 @@ func RunGoWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbose bool
 		select {
 		case <-ctx.Done():
 			return nil
-		case event := <-watcher.Events:
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return nil
+			}
+
+			// Add new directories to the watcher as they are created.
+			if event.Op&fsnotify.Create != 0 {
+				if stat, err := os.Stat(event.Name); err == nil && stat.IsDir() {
+					if shouldSkipDir(filepath.Base(event.Name)) {
+						continue
+					}
+					if err := addWatchRecursive(watcher, event.Name); err != nil && verbose {
+						fmt.Printf("[shadowfax] failed to watch directory %s: %v\n", event.Name, err)
+					}
+					continue
+				}
+			}
+
 			if !isGoFile(event.Name) || isTemplGenerated(event.Name) {
 				continue
 			}
-			if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename|fsnotify.Chmod) == 0 {
 				continue
 			}
 
@@ -65,12 +74,41 @@ func RunGoWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbose bool
 				default:
 				}
 			})
-		case err := <-watcher.Errors:
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return nil
+			}
 			if verbose {
 				fmt.Printf("[shadowfax] watcher error: %v\n", err)
 			}
 		}
 	}
+}
+
+func addWatchRecursive(w *fsnotify.Watcher, root string) error {
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+
+		if shouldSkipDir(d.Name()) {
+			return filepath.SkipDir
+		}
+
+		// fsnotify can race when directories are removed quickly; ignore missing paths.
+		if err := w.Add(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+
+		return nil
+	})
+}
+
+func shouldSkipDir(name string) bool {
+	return excludeDirs[name] || strings.HasPrefix(name, ".")
 }
 
 func isGoFile(path string) bool {
