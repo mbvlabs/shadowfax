@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -313,17 +314,26 @@ func runProxyServer(
 		Handler: handler,
 	}
 
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", server.Addr, err)
+	}
+
+	serveErr := make(chan error, 1)
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintf(os.Stderr, "Proxy server error: %v\n", err)
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			serveErr <- err
 		}
 	}()
 
-	<-ctx.Done()
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return server.Shutdown(shutdownCtx)
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return server.Shutdown(shutdownCtx)
+	case err := <-serveErr:
+		return fmt.Errorf("serve proxy on %s: %w", server.Addr, err)
+	}
 }
 
 // touchFile updates the modification time of a file to trigger file watchers.
