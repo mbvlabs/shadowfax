@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 )
 
 type TemplChange int8
@@ -25,6 +27,8 @@ var (
 	bytesNeedsRestart       = []byte(`needsRestart=true`)
 	bytesNeedsBrowserReload = []byte(`needsBrowserReload=true`)
 )
+
+var templShutdownTimeout = 2 * time.Second
 
 type TemplWatcherConfig struct {
 	Verbose     bool
@@ -105,13 +109,36 @@ func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg Te
 
 	select {
 	case <-ctx.Done():
-		// Graceful shutdown
-		if cmd.Process != nil {
-			cmd.Process.Signal(os.Interrupt)
-		}
-		<-done
+		stopTemplProcess(cmd, done)
+		return nil
 	case err := <-done:
 		return err
 	}
-	return nil
+}
+
+func stopTemplProcess(cmd *exec.Cmd, done <-chan error) {
+	if cmd.Process == nil {
+		return
+	}
+
+	_ = cmd.Process.Signal(os.Interrupt)
+
+	timer := time.NewTimer(templShutdownTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		return
+	case <-timer.C:
+	}
+
+	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		fmt.Printf("[shadowfax] templ kill fallback error: %v\n", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		fmt.Println("[shadowfax] templ did not exit after kill fallback")
+	}
 }
