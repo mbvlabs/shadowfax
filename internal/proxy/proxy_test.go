@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestServeLocalAssetGET(t *testing.T) {
@@ -215,5 +217,80 @@ func TestProxyUnavailableReturnsAutoRetryPage(t *testing.T) {
 	}
 	if !strings.Contains(body, "window.location.reload()") {
 		t.Fatalf("expected auto-retry script in response body")
+	}
+}
+
+func TestProxyUnavailableSkipsRetryWhenHeaderPresent(t *testing.T) {
+	ps, err := NewServer("http://127.0.0.1:65535", "/__shadowfax/events")
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://localhost:3000/", nil)
+	req.Header.Set(proxyRetryHeader, "1")
+	rec := httptest.NewRecorder()
+
+	start := time.Now()
+	ps.handleProxyError(rec, req, errors.New("dial tcp: connection refused"))
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when upstream is unavailable, got %d", rec.Code)
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("expected retry header to skip wait/retry path, took %s", elapsed)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "App restarting...") {
+		t.Fatalf("expected fallback page body, got %q", body)
+	}
+}
+
+func TestProxyUnavailableWebSocketReturnsPlainServiceUnavailable(t *testing.T) {
+	ps, err := NewServer("http://127.0.0.1:65535", "/__shadowfax/events")
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://localhost:3000/__shadowfax/events", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	rec := httptest.NewRecorder()
+
+	ps.handleProxyError(rec, req, errors.New("dial tcp: connection refused"))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for websocket upstream failure, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "text/plain") {
+		t.Fatalf("expected plain text websocket error response, got %q", got)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "upstream unavailable") {
+		t.Fatalf("expected plain upstream unavailable error body, got %q", body)
+	}
+	if strings.Contains(rec.Body.String(), "App restarting...") {
+		t.Fatal("did not expect HTML recovery page for websocket requests")
+	}
+}
+
+func TestProxyUnavailableHeadReturnsNoBody(t *testing.T) {
+	ps, err := NewServer("http://127.0.0.1:65535", "/__shadowfax/events")
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodHead, "http://localhost:3000/", nil)
+	req.Header.Set(proxyRetryHeader, "1")
+	rec := httptest.NewRecorder()
+
+	ps.handleProxyError(rec, req, errors.New("dial tcp: connection refused"))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when upstream is unavailable, got %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("expected empty body for HEAD fallback response, got %d bytes", rec.Body.Len())
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("expected HTML content type, got %q", got)
 	}
 }
