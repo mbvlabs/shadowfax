@@ -10,32 +10,33 @@ import (
 type HealthChecker struct {
 	url     string
 	timeout time.Duration
+	client  *http.Client
 }
 
 func NewHealthChecker(url string) *HealthChecker {
+	timeout := 500 * time.Millisecond
 	return &HealthChecker{
 		url:     url,
-		timeout: 500 * time.Millisecond,
+		timeout: timeout,
+		client: &http.Client{
+			Timeout: timeout,
+		},
 	}
 }
 
 func (h *HealthChecker) IsHealthy(ctx context.Context) bool {
-	client := &http.Client{
-		Timeout: h.timeout,
-	}
-
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, h.url, nil)
 	if err != nil {
 		return false
 	}
 
-	resp, err := client.Do(req)
+	resp, err := h.client.Do(req)
 	if err != nil {
 		return false
 	}
 	resp.Body.Close()
 
-	return true
+	return resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusBadRequest
 }
 
 func (h *HealthChecker) WaitForHealthy(ctx context.Context, pollInterval time.Duration) error {
