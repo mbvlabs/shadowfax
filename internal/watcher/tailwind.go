@@ -3,6 +3,7 @@ package watcher
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -58,11 +59,28 @@ func RunTailwindWatcher(ctx context.Context, cssRebuilt chan<- struct{}, cfg Tai
 	go scanTailwindOutput(stdout, cfg.Verbose, cssRebuilt, &lastRebuildSignal)
 	go scanTailwindOutput(stderr, cfg.Verbose, cssRebuilt, &lastRebuildSignal)
 
-	<-ctx.Done()
-	if cmd.Process != nil {
-		return cmd.Process.Kill()
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case <-ctx.Done():
+		if cmd.Process != nil {
+			if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				return err
+			}
+		}
+		if err := <-done; err != nil && ctx.Err() == nil {
+			return err
+		}
+		return nil
+	case err := <-done:
+		if err != nil && ctx.Err() != nil {
+			return nil
+		}
+		return err
 	}
-	return nil
 }
 
 func scanTailwindOutput(reader io.Reader, verbose bool, cssRebuilt chan<- struct{}, lastRebuildSignal *atomic.Int64) {
