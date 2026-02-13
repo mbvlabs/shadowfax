@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -262,25 +263,34 @@ func cleanup() {
 	copy(processes, runningProcesses)
 	processMutex.Unlock()
 
+	// Ask tracked child processes to stop first.
 	for _, cmd := range processes {
 		if cmd != nil && cmd.Process != nil {
-			cmd.Process.Kill()
+			_ = cmd.Process.Signal(syscall.SIGTERM)
 		}
 	}
 
-	wd, err := os.Getwd()
-	if err == nil {
-		exec.Command("pkill", "-f", wd+"/tmp/bin/main").Run()
-	}
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = DefaultAppPort
-	}
-	exec.Command("fuser", "-k", port+"/tcp").Run()
-
+	// Fallback to force kill only tracked child processes that are still alive.
 	time.Sleep(500 * time.Millisecond)
+	for _, cmd := range processes {
+		if cmd == nil || cmd.Process == nil {
+			continue
+		}
+		if processAlive(cmd.Process) {
+			_ = cmd.Process.Kill()
+		}
+	}
+
 	fmt.Printf("Cleanup complete.\n")
+}
+
+func processAlive(process *os.Process) bool {
+	if process == nil {
+		return false
+	}
+
+	err := process.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func runProxyServer(
