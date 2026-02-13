@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
@@ -169,15 +170,31 @@ func (ps *Server) serveLocalAsset(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 
+	if r.Method == http.MethodHead {
+		fileInfo, err := os.Stat(localPath)
+		if err != nil || fileInfo.IsDir() {
+			return false
+		}
+		contentType, err := detectContentTypeFromFile(localPath)
+		if err != nil {
+			return false
+		}
+
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		w.WriteHeader(http.StatusOK)
+		return true
+	}
+
 	content, err := os.ReadFile(localPath)
 	if err != nil {
 		return false
 	}
 
-	contentType := mime.TypeByExtension(filepath.Ext(localPath))
-	if contentType == "" {
-		contentType = http.DetectContentType(content)
-	}
+	contentType := detectContentType(localPath, content)
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-store, must-revalidate")
@@ -188,6 +205,34 @@ func (ps *Server) serveLocalAsset(w http.ResponseWriter, r *http.Request) bool {
 		_, _ = w.Write(content)
 	}
 	return true
+}
+
+func detectContentType(localPath string, content []byte) string {
+	contentType := mime.TypeByExtension(filepath.Ext(localPath))
+	if contentType == "" {
+		contentType = http.DetectContentType(content)
+	}
+	return contentType
+}
+
+func detectContentTypeFromFile(localPath string) (string, error) {
+	contentType := mime.TypeByExtension(filepath.Ext(localPath))
+	if contentType != "" {
+		return contentType, nil
+	}
+
+	file, err := os.Open(localPath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	var header [512]byte
+	n, readErr := file.Read(header[:])
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return "", readErr
+	}
+	return http.DetectContentType(header[:n]), nil
 }
 
 func (ps *Server) resolveLocalAssetPath(assetRelativePath string) (string, bool) {

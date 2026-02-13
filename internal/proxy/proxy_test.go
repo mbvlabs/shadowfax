@@ -49,7 +49,8 @@ func TestServeLocalAssetHEAD(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(cssPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cssPath, []byte("h1 { margin: 0; }"), 0o644); err != nil {
+	content := "h1 { margin: 0; }"
+	if err := os.WriteFile(cssPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -65,6 +66,12 @@ func TestServeLocalAssetHEAD(t *testing.T) {
 	}
 	if rec.Body.Len() != 0 {
 		t.Fatalf("expected empty body for HEAD request, got %d bytes", rec.Body.Len())
+	}
+	if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(len(content)) {
+		t.Fatalf("unexpected content-length: got %q want %q", got, strconv.Itoa(len(content)))
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/css; charset=utf-8" {
+		t.Fatalf("unexpected content-type: got %q", got)
 	}
 }
 
