@@ -11,6 +11,10 @@ import (
 func TestRunTemplWatcherCancelUsesKillFallback(t *testing.T) {
 	tmp := t.TempDir()
 	createTemplScript(t, tmp, `#!/usr/bin/env sh
+# Initial one-shot generate: succeed immediately
+case "$*" in
+  generate) exit 0 ;;
+esac
 trap '' INT
 while true; do
   sleep 1
@@ -58,6 +62,10 @@ done
 func TestRunTemplWatcherReturnsProcessError(t *testing.T) {
 	tmp := t.TempDir()
 	createTemplScript(t, tmp, `#!/usr/bin/env sh
+# Initial one-shot generate: succeed immediately
+case "$*" in
+  generate) exit 0 ;;
+esac
 echo "templ failed" 1>&2
 exit 7
 `)
@@ -77,6 +85,66 @@ exit 7
 	err = RunTemplWatcher(ctx, make(chan TemplChange, 1), TemplWatcherConfig{})
 	if err == nil {
 		t.Fatal("expected process error, got nil")
+	}
+}
+
+func TestRunTemplWatcherInitialGenerateFailure(t *testing.T) {
+	tmp := t.TempDir()
+	createTemplScript(t, tmp, `#!/usr/bin/env sh
+echo "generation error" 1>&2
+exit 1
+`)
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err = RunTemplWatcher(ctx, make(chan TemplChange, 1), TemplWatcherConfig{})
+	if err == nil {
+		t.Fatal("expected initial generate error, got nil")
+	}
+}
+
+func TestRunTemplWatcherClosesInitDone(t *testing.T) {
+	tmp := t.TempDir()
+	createTemplScript(t, tmp, `#!/usr/bin/env sh
+case "$*" in
+  generate) exit 0 ;;
+esac
+# watch mode: exit immediately
+exit 0
+`)
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	initDone := make(chan struct{})
+	_ = RunTemplWatcher(ctx, make(chan TemplChange, 1), TemplWatcherConfig{
+		InitDone: initDone,
+	})
+
+	select {
+	case <-initDone:
+		// success
+	default:
+		t.Fatal("InitDone channel was not closed")
 	}
 }
 

@@ -21,6 +21,7 @@ type AppServer struct {
 	addProcess            func(*exec.Cmd)
 	readyChan             chan<- struct{}
 	onRebuildStateChanged func(bool)
+	waitFor               <-chan struct{}
 	healthMu              sync.Mutex
 	healthCancel          context.CancelFunc
 }
@@ -31,6 +32,9 @@ type Config struct {
 	AddProcess            func(*exec.Cmd)
 	ReadyChan             chan<- struct{}
 	OnRebuildStateChanged func(bool)
+	// WaitFor is an optional channel that must be closed before the first build.
+	// Used to wait for templ's initial generation to complete.
+	WaitFor <-chan struct{}
 }
 
 func NewAppServer(cfg Config) *AppServer {
@@ -43,10 +47,20 @@ func NewAppServer(cfg Config) *AppServer {
 		addProcess:            cfg.AddProcess,
 		readyChan:             cfg.ReadyChan,
 		onRebuildStateChanged: cfg.OnRebuildStateChanged,
+		waitFor:               cfg.WaitFor,
 	}
 }
 
 func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error {
+	// Wait for prerequisites (e.g. templ initial generation) before first build.
+	if s.waitFor != nil {
+		select {
+		case <-s.waitFor:
+		case <-ctx.Done():
+			return nil
+		}
+	}
+
 	// Initial build and start
 	s.setRebuildState(true)
 	if err := s.rebuild(ctx); err != nil {

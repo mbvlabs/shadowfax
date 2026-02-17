@@ -94,12 +94,14 @@ func main() {
 	}()
 
 	// Start templ watcher
+	templInitDone := make(chan struct{})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		cfg := watcher.TemplWatcherConfig{
 			Verbose:    verbose,
 			AddProcess: addProcess,
+			InitDone:   templInitDone,
 		}
 		if err := watcher.RunTemplWatcher(ctx, templChange, cfg); err != nil {
 			errChan <- fmt.Errorf("live-templ: %w", err)
@@ -170,6 +172,7 @@ func main() {
 		Broadcaster: broadcaster,
 		AddProcess:  addProcess,
 		ReadyChan:   readyChan,
+		WaitFor:     templInitDone,
 		OnRebuildStateChanged: func(inProgress bool) {
 			rebuildInProgress.Store(inProgress)
 		},

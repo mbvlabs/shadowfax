@@ -31,8 +31,11 @@ var (
 var templShutdownTimeout = 2 * time.Second
 
 type TemplWatcherConfig struct {
-	Verbose     bool
-	AddProcess  func(*exec.Cmd)
+	Verbose    bool
+	AddProcess func(*exec.Cmd)
+	// InitDone is closed after the initial one-shot templ generate completes.
+	// Consumers (e.g. the app server) can wait on this before building.
+	InitDone chan struct{}
 }
 
 func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg TemplWatcherConfig) error {
@@ -41,8 +44,24 @@ func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg Te
 		return err
 	}
 
+	templBin := wd + "/bin/templ"
+
+	// Run an initial one-shot generate to ensure all _templ.go files and
+	// TEMPL_DEV_MODE proxy files in /tmp exist before the app server builds.
+	fmt.Println("[shadowfax] Running initial templ generate")
+	initCmd := exec.CommandContext(ctx, templBin, "generate")
+	initCmd.Stdout = os.Stdout
+	initCmd.Stderr = os.Stderr
+	if err := initCmd.Run(); err != nil {
+		return fmt.Errorf("initial templ generate failed: %w", err)
+	}
+
+	if cfg.InitDone != nil {
+		close(cfg.InitDone)
+	}
+
 	cmd := exec.Command(
-		wd+"/bin/templ", "generate",
+		templBin, "generate",
 		"--watch",
 		"--log-level", "debug",
 		// Only watch .templ files - the Go watcher handles .go files
