@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"strconv"
@@ -105,6 +106,27 @@ func TestCancelHealthMonitorPreventsReadySignal(t *testing.T) {
 	case got := <-rebuildState:
 		t.Fatalf("did not expect rebuild state callback after cancel, got %v", got)
 	default:
+	}
+}
+
+func TestStartHealthMonitorEnqueuesRebuildOnHealthFailure(t *testing.T) {
+	s := NewAppServer(Config{
+		AppPort:     "0",
+		Broadcaster: reload.NewBroadcaster(),
+		BroadcastWhenHealthy: func(ctx context.Context, healthURL string, broadcaster *reload.Broadcaster) error {
+			return errors.New("context deadline exceeded")
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.startHealthMonitor(ctx)
+	defer s.cancelHealthMonitor()
+
+	select {
+	case <-s.healthRebuildChan:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for health-triggered rebuild signal")
 	}
 }
 

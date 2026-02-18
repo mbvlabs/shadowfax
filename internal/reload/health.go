@@ -61,7 +61,7 @@ func (h *HealthChecker) WaitForHealthyWithTimeout(timeout time.Duration, pollInt
 	return h.WaitForHealthy(ctx, pollInterval)
 }
 
-func BroadcastWhenHealthy(ctx context.Context, healthURL string, broadcaster *Broadcaster) {
+func BroadcastWhenHealthy(ctx context.Context, healthURL string, broadcaster *Broadcaster) error {
 	checker := NewHealthChecker(healthURL)
 
 	// Wait a brief moment for the server to actually stop
@@ -73,8 +73,7 @@ func BroadcastWhenHealthy(ctx context.Context, healthURL string, broadcaster *Br
 
 	err := checker.WaitForHealthy(waitCtx, 100*time.Millisecond)
 	if err != nil {
-		fmt.Printf("[shadowfax] Server health check timed out: %v\n", err)
-		return
+		return err
 	}
 
 	// Small delay to ensure server is fully ready
@@ -82,4 +81,5 @@ func BroadcastWhenHealthy(ctx context.Context, healthURL string, broadcaster *Br
 
 	broadcaster.Broadcast()
 	fmt.Println("[shadowfax] Server healthy, broadcasting reload")
+	return nil
 }
