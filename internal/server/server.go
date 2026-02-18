@@ -18,9 +18,12 @@ type AppServer struct {
 	binPath               string
 	appPort               string
 	broadcaster           *reload.Broadcaster
+	broadcastWhenHealthy  func(context.Context, string, *reload.Broadcaster) error
+	healthRebuildChan     chan struct{}
 	addProcess            func(*exec.Cmd)
 	readyChan             chan<- struct{}
 	onRebuildStateChanged func(bool)
+	waitFor               <-chan struct{}
 	healthMu              sync.Mutex
 	healthCancel          context.CancelFunc
 }
@@ -28,25 +31,45 @@ type AppServer struct {
 type Config struct {
 	AppPort               string
 	Broadcaster           *reload.Broadcaster
+	BroadcastWhenHealthy  func(context.Context, string, *reload.Broadcaster) error
 	AddProcess            func(*exec.Cmd)
 	ReadyChan             chan<- struct{}
 	OnRebuildStateChanged func(bool)
+	// WaitFor is an optional channel that must be closed before the first build.
+	// Used to wait for templ's initial generation to complete.
+	WaitFor <-chan struct{}
 }
 
 func NewAppServer(cfg Config) *AppServer {
 	wd, _ := os.Getwd()
+	broadcastWhenHealthy := cfg.BroadcastWhenHealthy
+	if broadcastWhenHealthy == nil {
+		broadcastWhenHealthy = reload.BroadcastWhenHealthy
+	}
 	return &AppServer{
 		buildCmd:              "go build -o tmp/bin/main cmd/app/main.go",
 		binPath:               wd + "/tmp/bin/main",
 		appPort:               cfg.AppPort,
 		broadcaster:           cfg.Broadcaster,
+		broadcastWhenHealthy:  broadcastWhenHealthy,
+		healthRebuildChan:     make(chan struct{}, 1),
 		addProcess:            cfg.AddProcess,
 		readyChan:             cfg.ReadyChan,
 		onRebuildStateChanged: cfg.OnRebuildStateChanged,
+		waitFor:               cfg.WaitFor,
 	}
 }
 
 func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error {
+	// Wait for prerequisites (e.g. templ initial generation) before first build.
+	if s.waitFor != nil {
+		select {
+		case <-s.waitFor:
+		case <-ctx.Done():
+			return nil
+		}
+	}
+
 	// Initial build and start
 	s.setRebuildState(true)
 	if err := s.rebuild(ctx); err != nil {
@@ -60,6 +83,13 @@ func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error 
 			s.cancelHealthMonitor()
 			return nil
 		case <-rebuildChan:
+			s.setRebuildState(true)
+			s.stop()
+			if err := s.rebuild(ctx); err != nil {
+				fmt.Printf("[shadowfax] Build failed: %v\n", err)
+				continue
+			}
+		case <-s.healthRebuildChan:
 			s.setRebuildState(true)
 			s.stop()
 			if err := s.rebuild(ctx); err != nil {
@@ -117,6 +147,12 @@ func (s *AppServer) stop() {
 
 func (s *AppServer) startHealthMonitor(ctx context.Context) {
 	s.cancelHealthMonitor()
+	if s.broadcastWhenHealthy == nil {
+		s.broadcastWhenHealthy = reload.BroadcastWhenHealthy
+	}
+	if s.healthRebuildChan == nil {
+		s.healthRebuildChan = make(chan struct{}, 1)
+	}
 	healthCtx, cancel := context.WithCancel(ctx)
 	s.healthMu.Lock()
 	s.healthCancel = cancel
@@ -124,8 +160,16 @@ func (s *AppServer) startHealthMonitor(ctx context.Context) {
 
 	go func() {
 		healthURL := fmt.Sprintf("http://localhost:%s/", s.appPort)
-		reload.BroadcastWhenHealthy(healthCtx, healthURL, s.broadcaster)
+		err := s.broadcastWhenHealthy(healthCtx, healthURL, s.broadcaster)
 		if healthCtx.Err() != nil {
+			return
+		}
+		if err != nil {
+			fmt.Printf("[shadowfax] Server health check timed out: %v\n", err)
+			select {
+			case s.healthRebuildChan <- struct{}{}:
+			default:
+			}
 			return
 		}
 		s.setRebuildState(false)
