@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/mbvlabs/shadowfax/internal/platform"
 )
 
 func TestRunTemplWatcherCancelUsesKillFallback(t *testing.T) {
@@ -88,7 +90,7 @@ func createTemplScript(t *testing.T, root, content string) {
 		t.Fatal(err)
 	}
 
-	path := filepath.Join(binDir, "templ")
+	path := filepath.Join(binDir, platform.BinaryPath("templ"))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
+
+	"github.com/mbvlabs/shadowfax/internal/platform"
 )
 
 type TemplChange int8
@@ -41,8 +44,9 @@ func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg Te
 		return err
 	}
 
+	binPath := filepath.Join(wd, platform.BinaryPath("bin/templ"))
 	cmd := exec.Command(
-		wd+"/bin/templ", "generate",
+		binPath, "generate",
 		"--watch",
 		"--log-level", "debug",
 		// Only watch .templ files - the Go watcher handles .go files
@@ -121,7 +125,7 @@ func stopTemplProcess(cmd *exec.Cmd, done <-chan error) {
 		return
 	}
 
-	_ = cmd.Process.Signal(os.Interrupt)
+	_ = platform.SignalStop(cmd.Process)
 
 	timer := time.NewTimer(templShutdownTimeout)
 	defer timer.Stop()

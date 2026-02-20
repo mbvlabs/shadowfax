@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mbvlabs/shadowfax/internal/platform"
 )
 
 func TestIsTailwindRebuildDoneLine(t *testing.T) {
@@ -132,7 +134,7 @@ func createTailwindScript(t *testing.T, root, content string) {
 		t.Fatal(err)
 	}
 
-	path := filepath.Join(binDir, "tailwindcli")
+	path := filepath.Join(binDir, platform.BinaryPath("tailwindcli"))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
