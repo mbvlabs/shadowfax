@@ -8,9 +8,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/mbvlabs/shadowfax/internal/platform"
 )
 
 type TailwindConfig struct {
@@ -26,7 +29,8 @@ func RunTailwindWatcher(ctx context.Context, cssRebuilt chan<- struct{}, cfg Tai
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, wd+"/bin/tailwindcli",
+	binPath := filepath.Join(wd, platform.BinaryPath("bin/tailwindcli"))
+	cmd := exec.CommandContext(ctx, binPath,
 		"-i", "./css/base.css",
 		"-o", "./assets/css/style.css",
 		"--watch=always",

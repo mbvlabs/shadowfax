@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/mbvlabs/shadowfax/internal/platform"
 	"github.com/mbvlabs/shadowfax/internal/reload"
 )
 
@@ -35,9 +36,10 @@ type Config struct {
 
 func NewAppServer(cfg Config) *AppServer {
 	wd, _ := os.Getwd()
+	binPath := platform.BinaryPath("tmp/bin/main")
 	return &AppServer{
-		buildCmd:              "go build -o tmp/bin/main cmd/app/main.go",
-		binPath:               wd + "/tmp/bin/main",
+		buildCmd:              fmt.Sprintf("go build -o %s %s", binPath, filepath.Join("cmd", "app", "main.go")),
+		binPath:               filepath.Join(wd, binPath),
 		appPort:               cfg.AppPort,
 		broadcaster:           cfg.Broadcaster,
 		addProcess:            cfg.AddProcess,
@@ -73,7 +75,8 @@ func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error 
 func (s *AppServer) rebuild(ctx context.Context) error {
 	fmt.Println("[shadowfax] Building...")
 
-	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", "tmp/bin/main", "cmd/app/main.go")
+	binPath := platform.BinaryPath("tmp/bin/main")
+	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", binPath, filepath.Join("cmd", "app", "main.go"))
 	buildCmd.Stdout = os.Stdout
 	buildCmd.Stderr = os.Stderr
 
@@ -103,7 +106,7 @@ func (s *AppServer) rebuild(ctx context.Context) error {
 func (s *AppServer) stop() {
 	s.cancelHealthMonitor()
 	if s.cmd != nil && s.cmd.Process != nil {
-		s.cmd.Process.Signal(syscall.SIGTERM)
+		platform.SignalStop(s.cmd.Process)
 		done := make(chan error, 1)
 		go func() { done <- s.cmd.Wait() }()
 
