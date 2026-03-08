@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -26,7 +27,7 @@ func RunTailwindWatcher(ctx context.Context, cssRebuilt chan<- struct{}, cfg Tai
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, wd+"/bin/tailwindcli",
+	cmd := exec.CommandContext(ctx, filepath.Join(wd, "bin", "tailwindcli"),
 		"-i", "./css/base.css",
 		"-o", "./assets/css/style.css",
 		"--watch=always",

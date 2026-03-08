@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
+
+	"github.com/mbvlabs/shadowfax/internal/platform"
 )
 
 type TemplChange int8
@@ -31,8 +34,8 @@ var (
 var templShutdownTimeout = 2 * time.Second
 
 type TemplWatcherConfig struct {
-	Verbose     bool
-	AddProcess  func(*exec.Cmd)
+	Verbose    bool
+	AddProcess func(*exec.Cmd)
 }
 
 func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg TemplWatcherConfig) error {
@@ -42,7 +45,7 @@ func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg Te
 	}
 
 	cmd := exec.Command(
-		wd+"/bin/templ", "generate",
+		filepath.Join(wd, "bin", "templ"), "generate",
 		"--watch",
 		"--log-level", "debug",
 		// Only watch .templ files - the Go watcher handles .go files
@@ -121,7 +124,7 @@ func stopTemplProcess(cmd *exec.Cmd, done <-chan error) {
 		return
 	}
 
-	_ = cmd.Process.Signal(os.Interrupt)
+	_ = platform.SignalStop(cmd.Process)
 
 	timer := time.NewTimer(templShutdownTimeout)
 	defer timer.Stop()
