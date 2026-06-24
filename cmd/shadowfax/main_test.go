@@ -210,7 +210,7 @@ func TestRunProxyServerFailsFastWhenPortInUse(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err = runProxyServer(ctx, port, "8080", reload.NewBroadcaster())
+	err = runProxyServer(ctx, port, "8080", reload.NewBroadcaster(), nil)
 	if err == nil {
 		t.Fatal("expected bind error when proxy port is already in use")
 	}
