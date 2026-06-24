@@ -194,7 +194,7 @@ func TestModifyResponseSkipsInjectionForNotModified(t *testing.T) {
 }
 
 func TestProxyUnavailableReturnsAutoRetryPage(t *testing.T) {
-	ps, err := NewServer("http://127.0.0.1:65535", "/__shadowfax/events")
+	ps, err := NewServer("http://127.0.0.1:65535", "/__shadowfax/events", nil)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestProxyUnavailableReturnsAutoRetryPage(t *testing.T) {
 		t.Fatalf("expected HTML content type, got %q", got)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "App restarting...") {
+	if !strings.Contains(body, "Shadowfax: Development Server Restarting...") {
 		t.Fatalf("expected recovery page body, got %q", body)
 	}
 	if !strings.Contains(body, "window.location.reload()") {
@@ -221,7 +221,7 @@ func TestProxyUnavailableReturnsAutoRetryPage(t *testing.T) {
 }
 
 func TestProxyUnavailableSkipsRetryWhenHeaderPresent(t *testing.T) {
-	ps, err := NewServer("http://127.0.0.1:65535", "/__shadowfax/events")
+	ps, err := NewServer("http://127.0.0.1:65535", "/__shadowfax/events", nil)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}
@@ -240,13 +240,13 @@ func TestProxyUnavailableSkipsRetryWhenHeaderPresent(t *testing.T) {
 	if elapsed > 250*time.Millisecond {
 		t.Fatalf("expected retry header to skip wait/retry path, took %s", elapsed)
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "App restarting...") {
+	if body := rec.Body.String(); !strings.Contains(body, "Shadowfax: Development Server Restarting...") {
 		t.Fatalf("expected fallback page body, got %q", body)
 	}
 }
 
 func TestProxyUnavailableWebSocketReturnsPlainServiceUnavailable(t *testing.T) {
-	ps, err := NewServer("http://127.0.0.1:65535", "/__shadowfax/events")
+	ps, err := NewServer("http://127.0.0.1:65535", "/__shadowfax/events", nil)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}
@@ -267,13 +267,13 @@ func TestProxyUnavailableWebSocketReturnsPlainServiceUnavailable(t *testing.T) {
 	if body := rec.Body.String(); !strings.Contains(body, "upstream unavailable") {
 		t.Fatalf("expected plain upstream unavailable error body, got %q", body)
 	}
-	if strings.Contains(rec.Body.String(), "App restarting...") {
+	if strings.Contains(rec.Body.String(), "Shadowfax: Development Server Restarting...") {
 		t.Fatal("did not expect HTML recovery page for websocket requests")
 	}
 }
 
 func TestProxyUnavailableHeadReturnsNoBody(t *testing.T) {
-	ps, err := NewServer("http://127.0.0.1:65535", "/__shadowfax/events")
+	ps, err := NewServer("http://127.0.0.1:65535", "/__shadowfax/events", nil)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}

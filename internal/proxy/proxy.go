@@ -28,13 +28,14 @@ const proxyRetryHeader = "X-Shadowfax-Upstream-Retry"
 
 // Server is a reverse proxy that injects the hot reload script into HTML responses.
 type Server struct {
-	target      *url.URL
-	proxy       *httputil.ReverseProxy
-	wsPath      string
-	projectRoot string
+	target         *url.URL
+	proxy          *httputil.ReverseProxy
+	wsPath         string
+	projectRoot    string
+	isRebuilding   func() bool
 }
 
-func NewServer(targetURL string, wsPath string) (*Server, error) {
+func NewServer(targetURL string, wsPath string, isRebuilding func() bool) (*Server, error) {
 	target, err := url.Parse(targetURL)
 	if err != nil {
 		return nil, err
@@ -49,9 +50,10 @@ func NewServer(targetURL string, wsPath string) (*Server, error) {
 	}
 
 	ps := &Server{
-		target: target,
-		proxy:  proxy,
-		wsPath: wsPath,
+		target:       target,
+		proxy:        proxy,
+		wsPath:       wsPath,
+		isRebuilding: isRebuilding,
 	}
 
 	if wd, err := os.Getwd(); err == nil {
@@ -157,6 +159,11 @@ func (ps *Server) Handler(wsHandler http.Handler) http.Handler {
 			return
 		}
 		if ps.serveLocalAsset(w, r) {
+			return
+		}
+		if ps.isRebuilding != nil && ps.isRebuilding() {
+			r.Header.Set(proxyRetryHeader, "1")
+			ps.handleProxyError(w, r, errors.New("server restart in progress"))
 			return
 		}
 		ps.proxy.ServeHTTP(w, r)
@@ -299,24 +306,31 @@ func (ps *Server) handleProxyError(w http.ResponseWriter, r *http.Request, err e
 	// For normal browser navigation, return a websocket-driven recovery page so
 	// manual hard-refresh is never required during app restart windows.
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
-		body := fmt.Sprintf(`<!doctype html>
+		ps.renderRestartPage(w, r)
+		return
+	}
+
+	http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+}
+
+func (ps *Server) renderRestartPage(w http.ResponseWriter, r *http.Request) {
+	body := fmt.Sprintf(`<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Shadowfax: restarting app...</title>
+  <title>Shadowfax: Development Server Restarting...</title>
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; margin: 2rem; line-height: 1.45; color: #111827; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; line-height: 1.45; color: #111827; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; text-align: center; }
     code { background: #f3f4f6; padding: 0.1rem 0.35rem; border-radius: 0.25rem; }
   </style>
 </head>
 <body>
-  <h1>App restarting...</h1>
-  <p>Shadowfax is rebuilding your Go app. This page reconnects and reloads as soon as it is ready.</p>
+  <h1>Shadowfax: Development Server Restarting...</h1>
+  <p>Shadowfax is rebuilding your Go application. This page reconnects and reloads as soon as it is ready.</p>
   <p><small>Upstream: <code>%s</code></small></p>
   %s
   <script>
-    // Fallback in case websocket is unavailable.
     setInterval(function() {
       fetch(window.location.href, { method: 'HEAD', cache: 'no-store' })
         .then(function(resp) {
@@ -328,18 +342,14 @@ func (ps *Server) handleProxyError(w http.ResponseWriter, r *http.Request, err e
 </body>
 </html>`, ps.target.String(), HotReloadScript)
 
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store, must-revalidate")
-		w.Header().Set("Pragma", "no-cache")
-		w.Header().Set("Expires", "0")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		if r.Method == http.MethodGet {
-			_, _ = io.WriteString(w, body)
-		}
-		return
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	if r.Method == http.MethodGet {
+		_, _ = io.WriteString(w, body)
 	}
-
-	http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
 }
 
 func (ps *Server) waitForUpstreamReady(ctx context.Context, timeout time.Duration) bool {

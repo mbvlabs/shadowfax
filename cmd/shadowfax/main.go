@@ -74,12 +74,13 @@ func main() {
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, 5)
+	var rebuildInProgress atomic.Bool
 
 	// Start proxy server
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := runProxyServer(ctx, proxyPort, appPort, broadcaster); err != nil {
+		if err := runProxyServer(ctx, proxyPort, appPort, broadcaster, rebuildInProgress.Load); err != nil {
 			errChan <- fmt.Errorf("proxy-server: %w", err)
 		}
 	}()
@@ -112,7 +113,6 @@ func main() {
 	}
 
 	var cssRebuilt chan struct{}
-	var rebuildInProgress atomic.Bool
 
 	if useTailwind {
 		cssRebuilt = make(chan struct{}, 1)
@@ -325,10 +325,11 @@ func runProxyServer(
 	ctx context.Context,
 	proxyPort, appPort string,
 	broadcaster *reload.Broadcaster,
+	isRebuilding func() bool,
 ) error {
 	targetURL := fmt.Sprintf("http://localhost:%s", appPort)
 
-	proxyServer, err := proxy.NewServer(targetURL, reload.WebSocketPath)
+	proxyServer, err := proxy.NewServer(targetURL, reload.WebSocketPath, isRebuilding)
 	if err != nil {
 		return err
 	}
