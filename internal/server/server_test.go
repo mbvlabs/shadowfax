@@ -12,6 +12,21 @@ import (
 	"github.com/mbvlabs/shadowfax/internal/reload"
 )
 
+func TestClearLogsWiredFromConfig(t *testing.T) {
+	var called bool
+	cfg := Config{
+		ClearLogs: func() { called = true },
+	}
+	s := NewAppServer(cfg)
+	if s.clearLogs == nil {
+		t.Fatal("expected clearLogs callback to be set")
+	}
+	s.clearLogs()
+	if !called {
+		t.Fatal("expected clearLogs callback to be invoked")
+	}
+}
+
 func TestSetRebuildStateInvokesCallback(t *testing.T) {
 	var got atomic.Bool
 	s := &AppServer{
