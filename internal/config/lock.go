@@ -13,6 +13,7 @@ type AndurelLock struct {
 
 type ScaffoldConfig struct {
 	CSSFramework string `json:"cssFramework"`
+	Inertia      string `json:"inertia,omitempty"`
 }
 
 func ReadAndurelLock(path string) (*AndurelLock, error) {
@@ -43,4 +44,20 @@ func ShouldUseTailwind() (bool, error) {
 	}
 
 	return strings.EqualFold(lock.ScaffoldConfig.CSSFramework, "tailwind"), nil
+}
+
+func ShouldUseInertia() (bool, error) {
+	lock, err := ReadAndurelLock("andurel.lock")
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if lock.ScaffoldConfig == nil {
+		return false, nil
+	}
+
+	return lock.ScaffoldConfig.Inertia != "", nil
 }
