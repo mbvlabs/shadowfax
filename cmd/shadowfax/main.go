@@ -2,21 +2,21 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
 
 	"github.com/mbvlabs/shadowfax/internal/config"
+	"github.com/mbvlabs/shadowfax/internal/platform"
 	"github.com/mbvlabs/shadowfax/internal/proxy"
 	"github.com/mbvlabs/shadowfax/internal/reload"
 	"github.com/mbvlabs/shadowfax/internal/server"
@@ -70,7 +70,7 @@ func main() {
 	templChange := make(chan watcher.TemplChange, 64)
 
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigChan, platform.TerminationSignals()...)
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, 5)
@@ -193,7 +193,7 @@ func main() {
 				case watcher.TemplChangeNeedsBrowserReload:
 					if useTailwind {
 						fmt.Println("[shadowfax] Template changed, triggering CSS rebuild")
-						if err := touchFile("./css/base.css"); err != nil {
+						if err := touchFile(filepath.Join("css", "base.css")); err != nil {
 							fmt.Printf("[shadowfax] Warning: could not touch CSS file: %v\n", err)
 							// Fall back to broadcasting directly
 							broadcaster.Broadcast()
@@ -206,7 +206,7 @@ func main() {
 					fmt.Println("[shadowfax] Template Go code changed, rebuilding")
 					if useTailwind {
 						rebuildInProgress.Store(true)
-						if err := touchFile("./css/base.css"); err != nil && verbose {
+						if err := touchFile(filepath.Join("css", "base.css")); err != nil && verbose {
 							fmt.Printf("[shadowfax] Warning: could not touch CSS file: %v\n", err)
 						}
 					}
@@ -273,7 +273,7 @@ func cleanup() {
 	// Ask tracked child processes to stop first.
 	for _, cmd := range processes {
 		if cmd != nil && cmd.Process != nil {
-			_ = cmd.Process.Signal(syscall.SIGTERM)
+			_ = platform.SignalStop(cmd.Process)
 		}
 	}
 
@@ -283,7 +283,7 @@ func cleanup() {
 		if cmd == nil || cmd.Process == nil {
 			continue
 		}
-		if processAlive(cmd.Process) {
+		if platform.IsProcessAlive(cmd.Process) {
 			_ = cmd.Process.Kill()
 		}
 	}
@@ -304,21 +304,12 @@ func compactRunningProcessesLocked() {
 		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
 			continue
 		}
-		if !processAlive(cmd.Process) {
+		if !platform.IsProcessAlive(cmd.Process) {
 			continue
 		}
 		compacted = append(compacted, cmd)
 	}
 	runningProcesses = compacted
-}
-
-func processAlive(process *os.Process) bool {
-	if process == nil {
-		return false
-	}
-
-	err := process.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func runProxyServer(
