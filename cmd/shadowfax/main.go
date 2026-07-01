@@ -38,6 +38,14 @@ var (
 
 var verbose = os.Getenv("SHADOWFAX_VERBOSE") == "true"
 
+var clearLogs func()
+
+func init() {
+	if os.Getenv("SHADOWFAX_CLEAR_LOGS") != "" {
+		clearLogs = func() { fmt.Print("\033[2J\033[H") }
+	}
+}
+
 func main() {
 	// Handle --version flag
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
@@ -194,6 +202,7 @@ func main() {
 		AddProcess:   addProcess,
 		ReadyChan:    readyChan,
 		StateTracker: trk,
+		ClearLogs:    clearLogs,
 		OnRebuildStateChanged: func(inProgress bool) {
 			rebuildInProgress.Store(inProgress)
 		},
@@ -214,12 +223,15 @@ func main() {
 				return
 			case change := <-templChange:
 				switch change {
-				case watcher.TemplChangeNeedsBrowserReload:
-					if trk.HasErrorAt(state.IndexTempl) {
-						fmt.Println("[shadowfax] Templ has errors, skipping browser reload")
-						continue
-					}
-					if useTailwind {
+			case watcher.TemplChangeNeedsBrowserReload:
+				if clearLogs != nil {
+					clearLogs()
+				}
+				if trk.HasErrorAt(state.IndexTempl) {
+					fmt.Println("[shadowfax] Templ has errors, skipping browser reload")
+					continue
+				}
+				if useTailwind {
 						fmt.Println("[shadowfax] Template changed, triggering CSS rebuild")
 						if err := touchFile("./css/base.css"); err != nil {
 							fmt.Printf("[shadowfax] Warning: could not touch CSS file: %v\n", err)

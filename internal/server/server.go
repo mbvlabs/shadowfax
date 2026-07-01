@@ -27,6 +27,7 @@ type AppServer struct {
 	readyChan             chan<- struct{}
 	onRebuildStateChanged func(bool)
 	stateTracker          *state.Tracker
+	clearLogs             func()
 	healthMu              sync.Mutex
 	healthCancel          context.CancelFunc
 }
@@ -38,6 +39,7 @@ type Config struct {
 	ReadyChan             chan<- struct{}
 	OnRebuildStateChanged func(bool)
 	StateTracker          *state.Tracker
+	ClearLogs             func()
 }
 
 func (s *AppServer) makeBinaryPath() string {
@@ -57,6 +59,7 @@ func NewAppServer(cfg Config) *AppServer {
 		readyChan:             cfg.ReadyChan,
 		onRebuildStateChanged: cfg.OnRebuildStateChanged,
 		stateTracker:          cfg.StateTracker,
+		clearLogs:             cfg.ClearLogs,
 	}
 }
 
@@ -87,6 +90,10 @@ func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error 
 func (s *AppServer) rebuild(ctx context.Context) error {
 	s.prevBinPath = s.binPath
 	s.binPath = s.makeBinaryPath()
+
+	if s.clearLogs != nil {
+		s.clearLogs()
+	}
 
 	fmt.Println("[shadowfax] Building...")
 
