@@ -73,7 +73,7 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	var wg sync.WaitGroup
-	errChan := make(chan error, 5)
+	errChan := make(chan error, 6)
 	var rebuildInProgress atomic.Bool
 
 	// Start proxy server
@@ -150,6 +150,24 @@ func main() {
 		fmt.Println("[shadowfax] Tailwind watcher disabled")
 	}
 
+	useInertia, err := config.ShouldUseInertia()
+	if err != nil && verbose {
+		fmt.Printf("[shadowfax] Inertia detection error: %v\n", err)
+	}
+
+	if useInertia {
+		fmt.Println("[shadowfax] Starting npm run dev (Inertia frontend)")
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := runNpmDev(ctx); err != nil {
+				errChan <- fmt.Errorf("npm-run-dev: %w", err)
+			}
+		}()
+	} else if verbose {
+		fmt.Println("[shadowfax] Inertia frontend not detected")
+	}
+
 	readyChan := make(chan struct{}, 1)
 
 	// Clear rebuildInProgress when app server is ready
@@ -221,7 +239,11 @@ func main() {
 
 	fmt.Printf("\n  Proxy server: http://localhost:%s\n", proxyPort)
 	fmt.Printf("  App server:   http://localhost:%s (internal)\n", appPort)
-	fmt.Printf("  TEMPL_DEV_MODE: enabled (fast template reloads)\n\n")
+	fmt.Printf("  TEMPL_DEV_MODE: enabled (fast template reloads)\n")
+	if useInertia {
+		fmt.Printf("  Inertia frontend: npm run dev (Vite dev server)\n")
+	}
+	fmt.Println()
 
 	go func() {
 		select {
@@ -368,4 +390,38 @@ func runProxyServer(
 func touchFile(path string) error {
 	now := time.Now()
 	return os.Chtimes(path, now, now)
+}
+
+func runNpmDev(ctx context.Context) error {
+	wd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.CommandContext(ctx, "npm", "run", "dev")
+	cmd.Dir = wd
+
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("starting npm run dev: %w", err)
+	}
+
+	addProcess(cmd)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-done:
+		if err != nil && ctx.Err() != nil {
+			return nil
+		}
+		return err
+	}
 }
