@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -17,6 +19,8 @@ type AppServer struct {
 	cmd                   *exec.Cmd
 	buildCmd              string
 	binPath               string
+	binDir                string
+	prevBinPath           string
 	appPort               string
 	broadcaster           *reload.Broadcaster
 	addProcess            func(*exec.Cmd)
@@ -36,11 +40,17 @@ type Config struct {
 	StateTracker          *state.Tracker
 }
 
+func (s *AppServer) makeBinaryPath() string {
+	return filepath.Join(s.binDir, "server_"+strconv.FormatInt(time.Now().UnixNano(), 16))
+}
+
 func NewAppServer(cfg Config) *AppServer {
 	wd, _ := os.Getwd()
+	binDir := wd + "/tmp/bin"
 	return &AppServer{
 		buildCmd:              "go build -o tmp/bin/main cmd/app/main.go",
-		binPath:               wd + "/tmp/bin/main",
+		binPath:               filepath.Join(binDir, "server_"+strconv.FormatInt(time.Now().UnixNano(), 16)),
+		binDir:                binDir,
 		appPort:               cfg.AppPort,
 		broadcaster:           cfg.Broadcaster,
 		addProcess:            cfg.AddProcess,
@@ -75,13 +85,19 @@ func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error 
 }
 
 func (s *AppServer) rebuild(ctx context.Context) error {
+	s.prevBinPath = s.binPath
+	s.binPath = s.makeBinaryPath()
+
 	fmt.Println("[shadowfax] Building...")
 
-	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", "tmp/bin/main", "cmd/app/main.go")
+	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", s.binPath, "cmd/app/main.go")
 	buildCmd.Stdout = os.Stdout
 	buildCmd.Stderr = os.Stderr
 
 	if err := buildCmd.Run(); err != nil {
+		os.Remove(s.binPath)
+		s.binPath = s.prevBinPath
+		s.prevBinPath = ""
 		if s.stateTracker != nil {
 			s.stateTracker.SetError(state.IndexGoBuild, err.Error())
 		}
@@ -140,6 +156,10 @@ func (s *AppServer) startHealthMonitor(ctx context.Context) {
 		reload.BroadcastWhenHealthy(healthCtx, healthURL, s.broadcaster)
 		if healthCtx.Err() != nil {
 			return
+		}
+		if s.prevBinPath != "" {
+			os.Remove(s.prevBinPath)
+			s.prevBinPath = ""
 		}
 		s.setRebuildState(false)
 		if s.readyChan != nil {
