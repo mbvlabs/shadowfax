@@ -33,6 +33,7 @@ var templShutdownTimeout = 2 * time.Second
 type TemplWatcherConfig struct {
 	Verbose     bool
 	AddProcess  func(*exec.Cmd)
+	OnTemplErr  func(msg string)
 }
 
 func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg TemplWatcherConfig) error {
@@ -75,14 +76,20 @@ func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg Te
 				fmt.Printf("[templ] %s\n", line)
 			}
 
-			switch {
-			case bytes.HasPrefix(b, bytesPrefixWarning):
-				fmt.Printf("[shadowfax] templ warning: %s\n", line)
-			case bytes.HasPrefix(b, bytesPrefixErr):
-				fmt.Printf("[shadowfax] templ error: %s\n", line)
-			case bytes.HasPrefix(b, bytesPrefixErrCleared):
-				fmt.Println("[shadowfax] templ error cleared")
+		switch {
+		case bytes.HasPrefix(b, bytesPrefixWarning):
+			fmt.Printf("[shadowfax] templ warning: %s\n", line)
+		case bytes.HasPrefix(b, bytesPrefixErr):
+			fmt.Printf("[shadowfax] templ error: %s\n", line)
+			if cfg.OnTemplErr != nil {
+				cfg.OnTemplErr(line)
 			}
+		case bytes.HasPrefix(b, bytesPrefixErrCleared):
+			fmt.Println("[shadowfax] templ error cleared")
+			if cfg.OnTemplErr != nil {
+				cfg.OnTemplErr("")
+			}
+		}
 
 			if after, found := bytes.CutPrefix(b, bytesPrefixPostGenEvent); found {
 				switch {

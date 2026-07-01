@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mbvlabs/shadowfax/internal/reload"
+	"github.com/mbvlabs/shadowfax/internal/state"
 )
 
 type AppServer struct {
@@ -21,6 +22,7 @@ type AppServer struct {
 	addProcess            func(*exec.Cmd)
 	readyChan             chan<- struct{}
 	onRebuildStateChanged func(bool)
+	stateTracker          *state.Tracker
 	healthMu              sync.Mutex
 	healthCancel          context.CancelFunc
 }
@@ -31,6 +33,7 @@ type Config struct {
 	AddProcess            func(*exec.Cmd)
 	ReadyChan             chan<- struct{}
 	OnRebuildStateChanged func(bool)
+	StateTracker          *state.Tracker
 }
 
 func NewAppServer(cfg Config) *AppServer {
@@ -43,6 +46,7 @@ func NewAppServer(cfg Config) *AppServer {
 		addProcess:            cfg.AddProcess,
 		readyChan:             cfg.ReadyChan,
 		onRebuildStateChanged: cfg.OnRebuildStateChanged,
+		stateTracker:          cfg.StateTracker,
 	}
 }
 
@@ -61,9 +65,9 @@ func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error 
 			return nil
 		case <-rebuildChan:
 			s.setRebuildState(true)
-			s.stop()
 			if err := s.rebuild(ctx); err != nil {
 				fmt.Printf("[shadowfax] Build failed: %v\n", err)
+				s.setRebuildState(false)
 				continue
 			}
 		}
@@ -78,8 +82,17 @@ func (s *AppServer) rebuild(ctx context.Context) error {
 	buildCmd.Stderr = os.Stderr
 
 	if err := buildCmd.Run(); err != nil {
+		if s.stateTracker != nil {
+			s.stateTracker.SetError(state.IndexGoBuild, err.Error())
+		}
 		return fmt.Errorf("build failed: %w", err)
 	}
+
+	if s.stateTracker != nil {
+		s.stateTracker.SetError(state.IndexGoBuild, "")
+	}
+
+	s.stop()
 
 	fmt.Println("[shadowfax] Starting server...")
 	s.cmd = exec.CommandContext(ctx, s.binPath)
