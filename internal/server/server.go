@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mbvlabs/shadowfax/internal/ctxrun"
 	"github.com/mbvlabs/shadowfax/internal/reload"
 	"github.com/mbvlabs/shadowfax/internal/state"
 )
@@ -30,6 +31,8 @@ type AppServer struct {
 	clearLogs             func()
 	healthMu              sync.Mutex
 	healthCancel          context.CancelFunc
+	buildRunner           *ctxrun.Runner
+	cmdMu                 sync.Mutex
 }
 
 type Config struct {
@@ -60,34 +63,37 @@ func NewAppServer(cfg Config) *AppServer {
 		onRebuildStateChanged: cfg.OnRebuildStateChanged,
 		stateTracker:          cfg.StateTracker,
 		clearLogs:             cfg.ClearLogs,
+		buildRunner:           ctxrun.New(),
 	}
 }
 
 func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error {
-	// Initial build and start
 	s.setRebuildState(true)
-	if err := s.rebuild(ctx); err != nil {
-		fmt.Printf("[shadowfax] Initial build failed: %v\n", err)
-	}
+	s.buildRunner.Go(ctx, func(buildCtx context.Context) {
+		if err := s.rebuild(buildCtx, ctx); err != nil {
+			fmt.Printf("[shadowfax] Initial build failed: %v\n", err)
+			s.setRebuildState(false)
+		}
+	})
 
 	for {
 		select {
 		case <-ctx.Done():
-			s.stop()
 			s.cancelHealthMonitor()
 			return nil
 		case <-rebuildChan:
 			s.setRebuildState(true)
-			if err := s.rebuild(ctx); err != nil {
-				fmt.Printf("[shadowfax] Build failed: %v\n", err)
-				s.setRebuildState(false)
-				continue
-			}
+			s.buildRunner.Go(ctx, func(buildCtx context.Context) {
+				if err := s.rebuild(buildCtx, ctx); err != nil {
+					fmt.Printf("[shadowfax] Build failed: %v\n", err)
+					s.setRebuildState(false)
+				}
+			})
 		}
 	}
 }
 
-func (s *AppServer) rebuild(ctx context.Context) error {
+func (s *AppServer) rebuild(buildCtx context.Context, appCtx context.Context) error {
 	s.prevBinPath = s.binPath
 	s.binPath = s.makeBinaryPath()
 
@@ -97,7 +103,7 @@ func (s *AppServer) rebuild(ctx context.Context) error {
 
 	fmt.Println("[shadowfax] Building...")
 
-	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", s.binPath, "cmd/app/main.go")
+	buildCmd := exec.CommandContext(buildCtx, "go", "build", "-o", s.binPath, "cmd/app/main.go")
 	buildCmd.Stdout = os.Stdout
 	buildCmd.Stderr = os.Stderr
 
@@ -111,6 +117,13 @@ func (s *AppServer) rebuild(ctx context.Context) error {
 		return fmt.Errorf("build failed: %w", err)
 	}
 
+	if buildCtx.Err() != nil {
+		os.Remove(s.binPath)
+		s.binPath = s.prevBinPath
+		s.prevBinPath = ""
+		return buildCtx.Err()
+	}
+
 	if s.stateTracker != nil {
 		s.stateTracker.SetError(state.IndexGoBuild, "")
 	}
@@ -118,26 +131,31 @@ func (s *AppServer) rebuild(ctx context.Context) error {
 	s.stop()
 
 	fmt.Println("[shadowfax] Starting server...")
-	s.cmd = exec.CommandContext(ctx, s.binPath)
+	s.cmdMu.Lock()
+	s.cmd = exec.CommandContext(appCtx, s.binPath)
 	s.cmd.Env = append(os.Environ(), "TEMPL_DEV_MODE=true")
 	s.cmd.Stdout = os.Stdout
 	s.cmd.Stderr = os.Stderr
 
 	if err := s.cmd.Start(); err != nil {
+		s.cmdMu.Unlock()
 		return fmt.Errorf("start failed: %w", err)
 	}
+	s.cmdMu.Unlock()
 
 	if s.addProcess != nil {
 		s.addProcess(s.cmd)
 	}
 
-	s.startHealthMonitor(ctx)
+	s.startHealthMonitor(appCtx)
 
 	return nil
 }
 
 func (s *AppServer) stop() {
 	s.cancelHealthMonitor()
+	s.cmdMu.Lock()
+	defer s.cmdMu.Unlock()
 	if s.cmd != nil && s.cmd.Process != nil {
 		s.cmd.Process.Signal(syscall.SIGTERM)
 		done := make(chan error, 1)
