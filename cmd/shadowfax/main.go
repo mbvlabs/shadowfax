@@ -20,6 +20,7 @@ import (
 	"github.com/mbvlabs/shadowfax/internal/proxy"
 	"github.com/mbvlabs/shadowfax/internal/reload"
 	"github.com/mbvlabs/shadowfax/internal/server"
+	"github.com/mbvlabs/shadowfax/internal/state"
 	"github.com/mbvlabs/shadowfax/internal/watcher"
 )
 
@@ -72,6 +73,7 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
+	trk := state.New()
 	var wg sync.WaitGroup
 	errChan := make(chan error, 6)
 	var rebuildInProgress atomic.Bool
@@ -101,6 +103,9 @@ func main() {
 		cfg := watcher.TemplWatcherConfig{
 			Verbose:    verbose,
 			AddProcess: addProcess,
+			OnTemplErr: func(msg string) {
+				trk.SetError(state.IndexTempl, msg)
+			},
 		}
 		if err := watcher.RunTemplWatcher(ctx, templChange, cfg); err != nil {
 			errChan <- fmt.Errorf("live-templ: %w", err)
@@ -184,10 +189,11 @@ func main() {
 
 	// App server manager
 	appServer := server.NewAppServer(server.Config{
-		AppPort:     appPort,
-		Broadcaster: broadcaster,
-		AddProcess:  addProcess,
-		ReadyChan:   readyChan,
+		AppPort:      appPort,
+		Broadcaster:  broadcaster,
+		AddProcess:   addProcess,
+		ReadyChan:    readyChan,
+		StateTracker: trk,
 		OnRebuildStateChanged: func(inProgress bool) {
 			rebuildInProgress.Store(inProgress)
 		},
@@ -209,6 +215,10 @@ func main() {
 			case change := <-templChange:
 				switch change {
 				case watcher.TemplChangeNeedsBrowserReload:
+					if trk.HasErrorAt(state.IndexTempl) {
+						fmt.Println("[shadowfax] Templ has errors, skipping browser reload")
+						continue
+					}
 					if useTailwind {
 						fmt.Println("[shadowfax] Template changed, triggering CSS rebuild")
 						if err := touchFile("./css/base.css"); err != nil {
@@ -221,6 +231,10 @@ func main() {
 						broadcaster.Broadcast()
 					}
 				case watcher.TemplChangeNeedsRestart:
+					if trk.HasErrorAt(state.IndexTempl) {
+						fmt.Println("[shadowfax] Templ has errors, skipping rebuild")
+						continue
+					}
 					fmt.Println("[shadowfax] Template Go code changed, rebuilding")
 					if useTailwind {
 						rebuildInProgress.Store(true)
