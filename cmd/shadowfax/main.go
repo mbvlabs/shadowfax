@@ -168,13 +168,19 @@ func main() {
 		fmt.Printf("[shadowfax] Inertia detection error: %v\n", err)
 	}
 
+	jsRuntime := "npm"
 	if useInertia {
-		fmt.Println("[shadowfax] Starting npm run dev (Inertia frontend)")
+		jsRuntime, err = config.GetJavascriptRuntime()
+		if err != nil && verbose {
+			fmt.Printf("[shadowfax] JS runtime detection error: %v\n", err)
+			jsRuntime = "npm"
+		}
+		fmt.Printf("[shadowfax] Starting %s run dev (Inertia frontend)\n", jsRuntime)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runNpmDev(ctx); err != nil {
-				errChan <- fmt.Errorf("npm-run-dev: %w", err)
+			if err := runJsDev(ctx, jsRuntime); err != nil {
+				errChan <- fmt.Errorf("%s-run-dev: %w", jsRuntime, err)
 			}
 		}()
 	} else if verbose {
@@ -267,7 +273,7 @@ func main() {
 	fmt.Printf("  App server:   http://localhost:%s (internal)\n", appPort)
 	fmt.Printf("  TEMPL_DEV_MODE: enabled (fast template reloads)\n")
 	if useInertia {
-		fmt.Printf("  Inertia frontend: npm run dev (Vite dev server)\n")
+		fmt.Printf("  Inertia frontend: %s run dev (Vite dev server)\n", jsRuntime)
 	}
 	fmt.Println()
 
@@ -418,20 +424,20 @@ func touchFile(path string) error {
 	return os.Chtimes(path, now, now)
 }
 
-func runNpmDev(ctx context.Context) error {
+func runJsDev(ctx context.Context, runtime string) error {
 	wd, err := os.Getwd()
 	if err != nil {
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, "npm", "run", "dev")
+	cmd := exec.CommandContext(ctx, runtime, "run", "dev")
 	cmd.Dir = wd
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting npm run dev: %w", err)
+		return fmt.Errorf("starting %s run dev: %w", runtime, err)
 	}
 
 	addProcess(cmd)

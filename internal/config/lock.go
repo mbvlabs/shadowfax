@@ -12,8 +12,9 @@ type AndurelLock struct {
 }
 
 type ScaffoldConfig struct {
-	CSSFramework string `json:"cssFramework"`
-	Inertia      string `json:"inertia,omitempty"`
+	CSSFramework      string `json:"cssFramework"`
+	Inertia           string `json:"inertia,omitempty"`
+	JavascriptRuntime string `json:"javascriptRuntime,omitempty"`
 }
 
 func ReadAndurelLock(path string) (*AndurelLock, error) {
@@ -60,4 +61,20 @@ func ShouldUseInertia() (bool, error) {
 	}
 
 	return lock.ScaffoldConfig.Inertia != "", nil
+}
+
+func GetJavascriptRuntime() (string, error) {
+	lock, err := ReadAndurelLock("andurel.lock")
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "npm", nil
+		}
+		return "", err
+	}
+
+	if lock.ScaffoldConfig == nil || lock.ScaffoldConfig.JavascriptRuntime == "" {
+		return "npm", nil
+	}
+
+	return lock.ScaffoldConfig.JavascriptRuntime, nil
 }
