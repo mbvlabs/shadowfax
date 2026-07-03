@@ -342,6 +342,12 @@ func cleanup() {
 		}
 	}
 
+	// Clean up templ temp files.
+	wd, err := os.Getwd()
+	if err == nil {
+		os.RemoveAll(wd + "/tmp/templ")
+	}
+
 	fmt.Printf("Cleanup complete.\n")
 }
 
