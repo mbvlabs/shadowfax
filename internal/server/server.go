@@ -21,6 +21,7 @@ type AppServer struct {
 	buildCmd              string
 	binPath               string
 	binDir                string
+	templDir              string
 	prevBinPath           string
 	appPort               string
 	broadcaster           *reload.Broadcaster
@@ -52,10 +53,13 @@ func (s *AppServer) makeBinaryPath() string {
 func NewAppServer(cfg Config) *AppServer {
 	wd, _ := os.Getwd()
 	binDir := wd + "/tmp/bin"
+	templDir := wd + "/tmp/templ"
+	os.MkdirAll(templDir, 0755)
 	return &AppServer{
 		buildCmd:              "go build -o tmp/bin/main cmd/app/main.go",
 		binPath:               filepath.Join(binDir, "server_"+strconv.FormatInt(time.Now().UnixNano(), 16)),
 		binDir:                binDir,
+		templDir:              templDir,
 		appPort:               cfg.AppPort,
 		broadcaster:           cfg.Broadcaster,
 		addProcess:            cfg.AddProcess,
@@ -133,7 +137,7 @@ func (s *AppServer) rebuild(buildCtx context.Context, appCtx context.Context) er
 	fmt.Println("[shadowfax] Starting server...")
 	s.cmdMu.Lock()
 	s.cmd = exec.CommandContext(appCtx, s.binPath)
-	s.cmd.Env = append(os.Environ(), "TEMPL_DEV_MODE=true")
+	s.cmd.Env = append(os.Environ(), "TEMPL_DEV_MODE=true", "TMPDIR="+s.templDir)
 	s.cmd.Stdout = os.Stdout
 	s.cmd.Stderr = os.Stderr
 
