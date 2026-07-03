@@ -42,6 +42,9 @@ func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg Te
 		return err
 	}
 
+	templDir := wd + "/tmp/templ"
+	os.MkdirAll(templDir, 0755)
+
 	cmd := exec.Command(
 		wd+"/bin/templ", "generate",
 		"--watch",
@@ -49,6 +52,7 @@ func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg Te
 		// Only watch .templ files - the Go watcher handles .go files
 		"--watch-pattern", `(.+\.templ$)`,
 	)
+	cmd.Env = append(os.Environ(), "TMPDIR="+templDir)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
