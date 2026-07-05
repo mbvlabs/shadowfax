@@ -22,7 +22,6 @@ type AppServer struct {
 	binPath               string
 	binDir                string
 	templDir              string
-	prevBinPath           string
 	appPort               string
 	broadcaster           *reload.Broadcaster
 	addProcess            func(*exec.Cmd)
@@ -34,6 +33,7 @@ type AppServer struct {
 	healthCancel          context.CancelFunc
 	buildRunner           *ctxrun.Runner
 	cmdMu                 sync.Mutex
+	runBuild              func(context.Context, string) error
 }
 
 type Config struct {
@@ -54,10 +54,10 @@ func NewAppServer(cfg Config) *AppServer {
 	wd, _ := os.Getwd()
 	binDir := wd + "/tmp/bin"
 	templDir := wd + "/tmp/templ"
+	os.MkdirAll(binDir, 0755)
 	os.MkdirAll(templDir, 0755)
 	return &AppServer{
 		buildCmd:              "go build -o tmp/bin/main cmd/app/main.go",
-		binPath:               filepath.Join(binDir, "server_"+strconv.FormatInt(time.Now().UnixNano(), 16)),
 		binDir:                binDir,
 		templDir:              templDir,
 		appPort:               cfg.AppPort,
@@ -68,6 +68,7 @@ func NewAppServer(cfg Config) *AppServer {
 		stateTracker:          cfg.StateTracker,
 		clearLogs:             cfg.ClearLogs,
 		buildRunner:           ctxrun.New(),
+		runBuild:              runGoBuild,
 	}
 }
 
@@ -98,8 +99,7 @@ func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error 
 }
 
 func (s *AppServer) rebuild(buildCtx context.Context, appCtx context.Context) error {
-	s.prevBinPath = s.binPath
-	s.binPath = s.makeBinaryPath()
+	candidateBinPath := s.makeBinaryPath()
 
 	if s.clearLogs != nil {
 		s.clearLogs()
@@ -107,14 +107,13 @@ func (s *AppServer) rebuild(buildCtx context.Context, appCtx context.Context) er
 
 	fmt.Println("[shadowfax] Building...")
 
-	buildCmd := exec.CommandContext(buildCtx, "go", "build", "-o", s.binPath, "cmd/app/main.go")
-	buildCmd.Stdout = os.Stdout
-	buildCmd.Stderr = os.Stderr
+	runBuild := s.runBuild
+	if runBuild == nil {
+		runBuild = runGoBuild
+	}
 
-	if err := buildCmd.Run(); err != nil {
-		os.Remove(s.binPath)
-		s.binPath = s.prevBinPath
-		s.prevBinPath = ""
+	if err := runBuild(buildCtx, candidateBinPath); err != nil {
+		os.Remove(candidateBinPath)
 		if s.stateTracker != nil {
 			s.stateTracker.SetError(state.IndexGoBuild, err.Error())
 		}
@@ -122,9 +121,7 @@ func (s *AppServer) rebuild(buildCtx context.Context, appCtx context.Context) er
 	}
 
 	if buildCtx.Err() != nil {
-		os.Remove(s.binPath)
-		s.binPath = s.prevBinPath
-		s.prevBinPath = ""
+		os.Remove(candidateBinPath)
 		return buildCtx.Err()
 	}
 
@@ -132,34 +129,57 @@ func (s *AppServer) rebuild(buildCtx context.Context, appCtx context.Context) er
 		s.stateTracker.SetError(state.IndexGoBuild, "")
 	}
 
-	s.stop()
+	s.cmdMu.Lock()
+
+	if buildCtx.Err() != nil {
+		os.Remove(candidateBinPath)
+		s.cmdMu.Unlock()
+		return buildCtx.Err()
+	}
+
+	previousBinPath := s.binPath
+	s.stopLocked()
 
 	fmt.Println("[shadowfax] Starting server...")
-	s.cmdMu.Lock()
-	s.cmd = exec.CommandContext(appCtx, s.binPath)
-	s.cmd.Env = append(os.Environ(), "TEMPL_DEV_MODE=true", "TMPDIR="+s.templDir)
-	s.cmd.Stdout = os.Stdout
-	s.cmd.Stderr = os.Stderr
+	cmd := exec.CommandContext(appCtx, candidateBinPath)
+	cmd.Env = append(os.Environ(), "TEMPL_DEV_MODE=true", "TMPDIR="+s.templDir)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
-	if err := s.cmd.Start(); err != nil {
+	if err := cmd.Start(); err != nil {
+		os.Remove(candidateBinPath)
 		s.cmdMu.Unlock()
 		return fmt.Errorf("start failed: %w", err)
 	}
+
+	s.cmd = cmd
+	s.binPath = candidateBinPath
+	s.startHealthMonitor(appCtx, previousBinPath)
 	s.cmdMu.Unlock()
 
 	if s.addProcess != nil {
-		s.addProcess(s.cmd)
+		s.addProcess(cmd)
 	}
 
-	s.startHealthMonitor(appCtx)
-
 	return nil
+}
+
+func runGoBuild(ctx context.Context, outputPath string) error {
+	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", outputPath, "cmd/app/main.go")
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+	return buildCmd.Run()
 }
 
 func (s *AppServer) stop() {
 	s.cancelHealthMonitor()
 	s.cmdMu.Lock()
 	defer s.cmdMu.Unlock()
+	s.stopLocked()
+}
+
+func (s *AppServer) stopLocked() {
+	s.cancelHealthMonitor()
 	if s.cmd != nil && s.cmd.Process != nil {
 		s.cmd.Process.Signal(syscall.SIGTERM)
 		done := make(chan error, 1)
@@ -171,9 +191,10 @@ func (s *AppServer) stop() {
 			s.cmd.Process.Kill()
 		}
 	}
+	s.cmd = nil
 }
 
-func (s *AppServer) startHealthMonitor(ctx context.Context) {
+func (s *AppServer) startHealthMonitor(ctx context.Context, previousBinPath string) {
 	s.cancelHealthMonitor()
 	healthCtx, cancel := context.WithCancel(ctx)
 	s.healthMu.Lock()
@@ -186,9 +207,8 @@ func (s *AppServer) startHealthMonitor(ctx context.Context) {
 		if healthCtx.Err() != nil {
 			return
 		}
-		if s.prevBinPath != "" {
-			os.Remove(s.prevBinPath)
-			s.prevBinPath = ""
+		if previousBinPath != "" {
+			os.Remove(previousBinPath)
 		}
 		s.setRebuildState(false)
 		if s.readyChan != nil {
