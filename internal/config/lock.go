@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"strings"
 )
 
 type AndurelLock struct {
@@ -12,7 +11,6 @@ type AndurelLock struct {
 }
 
 type ScaffoldConfig struct {
-	CSSFramework      string `json:"cssFramework"`
 	Inertia           string `json:"inertia,omitempty"`
 	JavascriptRuntime string `json:"javascriptRuntime,omitempty"`
 }
@@ -32,7 +30,7 @@ func ReadAndurelLock(path string) (*AndurelLock, error) {
 }
 
 func ShouldUseTailwind() (bool, error) {
-	lock, err := ReadAndurelLock("andurel.lock")
+	info, err := os.Stat("css/base.css")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
@@ -40,11 +38,7 @@ func ShouldUseTailwind() (bool, error) {
 		return false, err
 	}
 
-	if lock.ScaffoldConfig == nil {
-		return false, nil
-	}
-
-	return strings.EqualFold(lock.ScaffoldConfig.CSSFramework, "tailwind"), nil
+	return !info.IsDir(), nil
 }
 
 func ShouldUseInertia() (bool, error) {
