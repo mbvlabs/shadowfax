@@ -49,15 +49,7 @@ Shadowfax is configured via environment variables (supports `.env` files):
 
 ### Tailwind CSS
 
-Tailwind watching is automatically enabled if your `andurel.lock` file specifies Tailwind as the CSS framework:
-
-```json
-{
-  "scaffoldConfig": {
-    "cssFramework": "tailwind"
-  }
-}
-```
+Tailwind watching is automatically enabled when the project has a `css/base.css` file.
 
 ## How It Works
 
