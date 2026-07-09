@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mbvlabs/shadowfax/internal/ctxrun"
 	"github.com/mbvlabs/shadowfax/internal/reload"
 )
 
@@ -211,6 +214,138 @@ func TestStartHealthMonitorRemovesCapturedPreviousBinaryOnly(t *testing.T) {
 	if _, err := os.Stat(currentBin); err != nil {
 		t.Fatalf("expected current binary to remain: %v", err)
 	}
+}
+
+func TestRuntimeOutputGuardSuppressesRepeatedMissingFileLines(t *testing.T) {
+	restarts := 0
+	guard := newRuntimeOutputGuard(3, func() { restarts++ })
+
+	for i := 0; i < 2; i++ {
+		emit, notice := guard.handleLine("open tmp/bin/server: no such file or directory")
+		if !emit || notice != "" {
+			t.Fatalf("line %d should emit without notice, emit=%v notice=%q", i+1, emit, notice)
+		}
+	}
+
+	emit, notice := guard.handleLine("open tmp/bin/server: no such file or directory")
+	if !emit {
+		t.Fatal("threshold line should still be emitted")
+	}
+	if notice == "" {
+		t.Fatal("threshold line should produce suppression notice")
+	}
+	if restarts != 1 {
+		t.Fatalf("expected one restart request, got %d", restarts)
+	}
+
+	emit, notice = guard.handleLine("open tmp/bin/server: no such file or directory")
+	if emit || notice != "" {
+		t.Fatalf("post-threshold line should be suppressed without extra notice, emit=%v notice=%q", emit, notice)
+	}
+	if restarts != 1 {
+		t.Fatalf("expected restart request to remain one, got %d", restarts)
+	}
+
+	emit, notice = guard.handleLine("normal app log")
+	if !emit || notice != "" {
+		t.Fatalf("normal line should reset and emit, emit=%v notice=%q", emit, notice)
+	}
+
+	emit, notice = guard.handleLine("file not found")
+	if !emit || notice != "" {
+		t.Fatalf("first missing-file line after reset should emit, emit=%v notice=%q", emit, notice)
+	}
+	if restarts != 1 {
+		t.Fatalf("restart should only fire once per guard, got %d", restarts)
+	}
+}
+
+func TestForwardRuntimeOutputCollapsesMissingFileSpam(t *testing.T) {
+	guard := newRuntimeOutputGuard(2, nil)
+	var out bytes.Buffer
+
+	forwardRuntimeOutput(
+		bytes.NewBufferString("first\nfile not found\nfile not found\nfile not found\nnormal\n"),
+		&out,
+		guard,
+	)
+
+	got := out.String()
+	if !bytes.Contains([]byte(got), []byte("first\n")) {
+		t.Fatalf("expected normal line to pass through, got %q", got)
+	}
+	if count := bytes.Count([]byte(got), []byte("file not found\n")); count != 2 {
+		t.Fatalf("expected exactly two missing-file lines before suppression, got %d in %q", count, got)
+	}
+	if !bytes.Contains([]byte(got), []byte("Suppressing repeated missing-file output")) {
+		t.Fatalf("expected suppression notice, got %q", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("normal\n")) {
+		t.Fatalf("expected later normal line to pass through, got %q", got)
+	}
+}
+
+func TestRepeatedRuntimeMissingFileOutputTriggersRebuild(t *testing.T) {
+	tmpDir := t.TempDir()
+	var buildCount atomic.Int32
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := &AppServer{
+		binDir:                 tmpDir,
+		templDir:               filepath.Join(tmpDir, "templ"),
+		appPort:                getUnusedPort(t),
+		broadcaster:            reload.NewBroadcaster(),
+		buildRunner:            ctxrun.New(),
+		runtimeRestartDelay:    10 * time.Millisecond,
+		runtimeOutputThreshold: 3,
+		stdout:                 io.Discard,
+		stderr:                 io.Discard,
+	}
+	s.runBuild = func(ctx context.Context, candidateBinPath string) error {
+		buildCount.Add(1)
+		return writeMissingFileEmitter(candidateBinPath)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.Run(ctx, make(chan struct{}, 1))
+	}()
+
+	deadline := time.After(2 * time.Second)
+	for buildCount.Load() < 2 {
+		select {
+		case err := <-errCh:
+			t.Fatalf("server exited before runtime restart: %v", err)
+		case <-deadline:
+			t.Fatalf("timed out waiting for runtime restart; build count=%d", buildCount.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("expected nil after cancel, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not exit after cancel")
+	}
+}
+
+func writeMissingFileEmitter(path string) error {
+	content := `#!/usr/bin/env sh
+i=0
+while [ "$i" -lt 20 ]; do
+  echo "open tmp/bin/server: no such file or directory" 1>&2
+  i=$((i + 1))
+  sleep 0.01
+done
+sleep 5
+`
+	return os.WriteFile(path, []byte(content), 0o755)
 }
 
 func startHealthyServer(t *testing.T) (string, func()) {
