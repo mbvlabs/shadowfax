@@ -1,58 +1,173 @@
 name: Release
+run-name: Release ${{ inputs.tag }}
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish, for example v0.9.0
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  release:
+    runs-on: ubuntu-24.04-arm
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag }}
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.25.3'
+      - name: Validate tag and release state
+        shell: bash
+        run: |
+          set -euo pipefail
 
-    - name: Get version
-      id: version
-      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $TAG" >&2
+            exit 1
+          fi
 
-    - name: Build binaries
-      run: |
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-w -s -X main.Version=${{ steps.version.outputs.VERSION }}" -o shadowfax-linux-amd64 ./cmd/shadowfax
-        CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "-w -s -X main.Version=${{ steps.version.outputs.VERSION }}" -o shadowfax-darwin-amd64 ./cmd/shadowfax
-        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-w -s -X main.Version=${{ steps.version.outputs.VERSION }}" -o shadowfax-darwin-arm64 ./cmd/shadowfax
+          tag_commit="$(git rev-list -n 1 "$TAG")"
+          head_commit="$(git rev-parse HEAD)"
+          if [[ "$head_commit" != "$tag_commit" ]]; then
+            echo "Checked out $head_commit instead of tag commit $tag_commit" >&2
+            exit 1
+          fi
 
-    - name: Upload linux asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./shadowfax-linux-amd64
-        asset_name: shadowfax-linux-amd64
-        asset_content_type: application/octet-stream
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists. Existing releases and assets are never modified." >&2
+            exit 1
+          fi
 
-    - name: Upload macOS AMD64 asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./shadowfax-darwin-amd64
-        asset_name: shadowfax-darwin-amd64
-        asset_content_type: application/octet-stream
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.5'
+          cache: true
 
-    - name: Upload macOS ARM64 asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./shadowfax-darwin-arm64
-        asset_name: shadowfax-darwin-arm64
-        asset_content_type: application/octet-stream
+      - name: Build release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          while read -r goos goarch asset; do
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build \
+                -ldflags "-w -s -X main.Version=$TAG" \
+                -o "dist/$asset" \
+                ./cmd/shadowfax
+          done < .github/release-targets.txt
+
+      - name: Validate local release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t required_assets < <(awk '{print $3}' .github/release-targets.txt)
+
+          if [[ "${#required_assets[@]}" -ne 4 ]]; then
+            echo "Expected four release targets, found ${#required_assets[@]}" >&2
+            exit 1
+          fi
+
+          cd dist
+          for asset in "${required_assets[@]}"; do
+            if [[ ! -f "$asset" || ! -x "$asset" ]]; then
+              echo "Missing or non-executable release asset: $asset" >&2
+              exit 1
+            fi
+            go version -m "$asset" >/dev/null
+          done
+
+          sha256sum "${required_assets[@]}" > checksums.txt
+          sha256sum --check --strict checksums.txt
+
+          if [[ "$(wc -l < checksums.txt)" -ne 4 ]]; then
+            echo "checksums.txt must contain exactly four entries" >&2
+            exit 1
+          fi
+
+          for asset in "${required_assets[@]}"; do
+            if ! grep -Eq "^[0-9a-f]{64}  ${asset}$" checksums.txt; then
+              echo "Missing or invalid checksum entry for $asset" >&2
+              exit 1
+            fi
+          done
+
+          version_output="$(./shadowfax-linux-arm64 --version)"
+          if [[ "$version_output" != "shadowfax version $TAG" ]]; then
+            echo "Unexpected Linux arm64 version output: $version_output" >&2
+            exit 1
+          fi
+
+      - name: Create draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t required_assets < <(awk '{print "dist/" $3}' .github/release-targets.txt)
+          required_assets+=(dist/checksums.txt)
+
+          gh release create "$TAG" \
+            "${required_assets[@]}" \
+            --draft \
+            --generate-notes \
+            --title "$TAG" \
+            --verify-tag
+
+      - name: Verify uploaded release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t required_assets < <(awk '{print $3}' .github/release-targets.txt)
+          mkdir uploaded
+          gh release download "$TAG" --dir uploaded
+
+          cd uploaded
+          for asset in "${required_assets[@]}"; do
+            if [[ ! -f "$asset" ]]; then
+              echo "Draft release is missing $asset" >&2
+              exit 1
+            fi
+          done
+
+          if [[ ! -f checksums.txt ]]; then
+            echo "Draft release is missing checksums.txt" >&2
+            exit 1
+          fi
+
+          sha256sum --check --strict checksums.txt
+          if ! cmp checksums.txt ../dist/checksums.txt; then
+            echo "Uploaded checksums.txt differs from the validated local file" >&2
+            exit 1
+          fi
+
+          for asset in "${required_assets[@]}"; do
+            if ! grep -Eq "^[0-9a-f]{64}  ${asset}$" checksums.txt; then
+              echo "Uploaded checksums.txt has no valid entry for $asset" >&2
+              exit 1
+            fi
+          done
+
+          chmod +x shadowfax-linux-arm64
+          version_output="$(./shadowfax-linux-arm64 --version)"
+          if [[ "$version_output" != "shadowfax version $TAG" ]]; then
+            echo "Unexpected uploaded Linux arm64 version output: $version_output" >&2
+            exit 1
+          fi
+
+      - name: Publish release
+        shell: bash
+        run: gh release edit "$TAG" --draft=false
