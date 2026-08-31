@@ -51,7 +51,7 @@ Shadowfax is configured via environment variables (supports `.env` files):
 
 For Inertia projects, shadowfax always runs the Vite dev server (`npm run dev` or the configured package manager).
 
-SSR settings follow the same precedence as generated `config/inertia.go`: process environment (including `.env`), then `.env.example`, then `DefaultInertiaSSR*` constants in `config/inertia.go`.
+SSR settings follow the same precedence as generated `config/inertia.go`: process environment (including `.env`), then `DefaultInertiaSSR*` constants in `config/inertia.go`.
 
 | Mode | Shadowfax | Go application |
 |------|-----------|----------------|

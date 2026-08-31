@@ -43,43 +43,9 @@ func parseQuotedConsts(source []byte) map[string]string {
 	return values
 }
 
-func readEnvFileDefaults(path string) map[string]string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-
-	values := make(map[string]string)
-	for line := range strings.Lines(string(data)) {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if key == "" {
-			continue
-		}
-		values[key] = strings.Trim(value, `"`)
-	}
-	return values
-}
-
-func applySSRSetting(current, envKey, fileDefault string, example map[string]string) string {
-	if strings.TrimSpace(current) != "" {
-		return current
-	}
+func resolveSSRSetting(envKey, fileDefault string) string {
 	if value := strings.TrimSpace(os.Getenv(envKey)); value != "" {
 		return value
-	}
-	if example != nil {
-		if value := strings.TrimSpace(example[envKey]); value != "" {
-			return value
-		}
 	}
 	return strings.TrimSpace(fileDefault)
 }
