@@ -23,16 +23,36 @@ type SSRSettings struct {
 	Port    string
 }
 
-// ReadSSRSettings loads SSR settings from the environment and scaffold lock.
+// ReadSSRSettings resolves SSR settings using the same precedence as generated
+// config/inertia.go: process environment (including .env), .env.example, then
+// DefaultInertiaSSR* constants from config/inertia.go.
 func ReadSSRSettings(scaffold *ScaffoldConfig) (SSRSettings, error) {
-	settings := SSRSettings{
-		Mode:    strings.ToLower(strings.TrimSpace(os.Getenv("INERTIA_SSR_MODE"))),
-		URL:     strings.TrimSpace(os.Getenv("INERTIA_SSR_URL")),
-		Bundle:  strings.TrimSpace(os.Getenv("INERTIA_SSR_BUNDLE")),
-		Runtime: strings.TrimSpace(os.Getenv("INERTIA_SSR_RUNTIME")),
-	}
+	fileDefaults := readInertiaFileDefaults("config/inertia.go")
+	exampleEnv := readEnvFileDefaults(".env.example")
 
-	if settings.Mode == "" && strings.EqualFold(strings.TrimSpace(os.Getenv("INERTIA_SSR_ENABLED")), "true") {
+	settings := SSRSettings{
+		Mode: applySSRSetting("", "INERTIA_SSR_MODE", fileDefaults.Mode, exampleEnv),
+		URL:  applySSRSetting("", "INERTIA_SSR_URL", fileDefaults.URL, exampleEnv),
+		Bundle: applySSRSetting(
+			"",
+			"INERTIA_SSR_BUNDLE",
+			fileDefaults.Bundle,
+			exampleEnv,
+		),
+		Runtime: applySSRSetting(
+			"",
+			"INERTIA_SSR_RUNTIME",
+			fileDefaults.Runtime,
+			exampleEnv,
+		),
+	}
+	settings.Mode = strings.ToLower(strings.TrimSpace(settings.Mode))
+
+	enabled := strings.TrimSpace(os.Getenv("INERTIA_SSR_ENABLED"))
+	if exampleEnv != nil && enabled == "" {
+		enabled = strings.TrimSpace(exampleEnv["INERTIA_SSR_ENABLED"])
+	}
+	if settings.Mode == "" && strings.EqualFold(enabled, "true") {
 		settings.Mode = "managed"
 	}
 	if settings.URL == "" {
