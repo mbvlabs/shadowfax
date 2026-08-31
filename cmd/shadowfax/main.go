@@ -178,7 +178,8 @@ func main() {
 		if lock != nil {
 			scaffold = lock.ScaffoldConfig
 		}
-		ssrSettings, ssrErr := config.ReadSSRSettings(scaffold)
+		var ssrErr error
+		ssrSettings, ssrErr = config.ReadSSRSettings(scaffold)
 		if ssrErr != nil {
 			errChan <- fmt.Errorf("inertia-ssr-config: %w", ssrErr)
 		} else if ssrSettings.ShouldShadowfaxStart() {
