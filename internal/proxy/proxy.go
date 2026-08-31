@@ -28,11 +28,11 @@ const proxyRetryHeader = "X-Shadowfax-Upstream-Retry"
 
 // Server is a reverse proxy that injects the hot reload script into HTML responses.
 type Server struct {
-	target         *url.URL
-	proxy          *httputil.ReverseProxy
-	wsPath         string
-	projectRoot    string
-	isRebuilding   func() bool
+	target       *url.URL
+	proxy        *httputil.ReverseProxy
+	wsPath       string
+	projectRoot  string
+	isRebuilding func() bool
 }
 
 func NewServer(targetURL string, wsPath string, isRebuilding func() bool) (*Server, error) {

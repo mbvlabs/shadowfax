@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"net"
 	"os"
 	"sync/atomic"
@@ -206,8 +205,7 @@ func TestRunProxyServerFailsFastWhenPortInUse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	start := time.Now()
 	err = runProxyServer(ctx, port, "8080", reload.NewBroadcaster(), nil)

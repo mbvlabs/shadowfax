@@ -73,8 +73,7 @@ func TestStartHealthMonitorSignalsReadyAndClearsRebuildState(t *testing.T) {
 		t.Fatal("timed out waiting for initial rebuild state callback")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	s.startHealthMonitor(ctx, "")
 	defer s.cancelHealthMonitor()
 
@@ -108,8 +107,7 @@ func TestCancelHealthMonitorPreventsReadySignal(t *testing.T) {
 		},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	s.startHealthMonitor(ctx, "")
 	s.cancelHealthMonitor()
 
@@ -197,8 +195,7 @@ func TestStartHealthMonitorRemovesCapturedPreviousBinaryOnly(t *testing.T) {
 		binPath:     currentBin,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	s.startHealthMonitor(ctx, previousBin)
 	defer s.cancelHealthMonitor()
 
@@ -220,7 +217,7 @@ func TestRuntimeOutputGuardSuppressesRepeatedMissingFileLines(t *testing.T) {
 	restarts := 0
 	guard := newRuntimeOutputGuard(3, func() { restarts++ })
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		emit, notice := guard.handleLine("open tmp/bin/server: no such file or directory")
 		if !emit || notice != "" {
 			t.Fatalf("line %d should emit without notice, emit=%v notice=%q", i+1, emit, notice)
