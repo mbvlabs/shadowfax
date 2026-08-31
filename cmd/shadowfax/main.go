@@ -20,6 +20,7 @@ import (
 	"github.com/mbvlabs/shadowfax/internal/proxy"
 	"github.com/mbvlabs/shadowfax/internal/reload"
 	"github.com/mbvlabs/shadowfax/internal/server"
+	"github.com/mbvlabs/shadowfax/internal/ssr"
 	"github.com/mbvlabs/shadowfax/internal/state"
 	"github.com/mbvlabs/shadowfax/internal/watcher"
 )
@@ -83,31 +84,25 @@ func main() {
 
 	trk := state.New()
 	var wg sync.WaitGroup
-	errChan := make(chan error, 6)
+	errChan := make(chan error, 8)
 	var rebuildInProgress atomic.Bool
 
 	// Start proxy server
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := runProxyServer(ctx, proxyPort, appPort, broadcaster, rebuildInProgress.Load); err != nil {
 			errChan <- fmt.Errorf("proxy-server: %w", err)
 		}
-	}()
+	})
 
 	// Start Go file watcher
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := watcher.RunGoWatcher(ctx, rebuildChan, verbose); err != nil {
 			errChan <- fmt.Errorf("go-watcher: %w", err)
 		}
-	}()
+	})
 
 	// Start templ watcher
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		cfg := watcher.TemplWatcherConfig{
 			Verbose:    verbose,
 			AddProcess: addProcess,
@@ -118,7 +113,7 @@ func main() {
 		if err := watcher.RunTemplWatcher(ctx, templChange, cfg); err != nil {
 			errChan <- fmt.Errorf("live-templ: %w", err)
 		}
-	}()
+	})
 
 	useTailwind, err := config.ShouldUseTailwind()
 	if err != nil && verbose {
@@ -131,9 +126,7 @@ func main() {
 		cssRebuilt = make(chan struct{}, 1)
 
 		// Start tailwind watcher
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			cfg := watcher.TailwindConfig{
 				Verbose:    verbose,
 				AddProcess: addProcess,
@@ -141,7 +134,7 @@ func main() {
 			if err := watcher.RunTailwindWatcher(ctx, cssRebuilt, cfg); err != nil {
 				errChan <- fmt.Errorf("live-tailwind: %w", err)
 			}
-		}()
+		})
 
 		// Handle CSS rebuild events from tailwind
 		go func() {
@@ -169,20 +162,53 @@ func main() {
 	}
 
 	jsRuntime := "npm"
+	var ssrSettings config.SSRSettings
 	if useInertia {
 		jsRuntime, err = config.GetJavascriptRuntime()
 		if err != nil && verbose {
 			fmt.Printf("[shadowfax] JS runtime detection error: %v\n", err)
 			jsRuntime = "npm"
 		}
+
+		lock, lockErr := config.ReadAndurelLock("andurel.lock")
+		if lockErr != nil && verbose {
+			fmt.Printf("[shadowfax] andurel.lock read error: %v\n", lockErr)
+		}
+		var scaffold *config.ScaffoldConfig
+		if lock != nil {
+			scaffold = lock.ScaffoldConfig
+		}
+		ssrSettings, ssrErr := config.ReadSSRSettings(scaffold)
+		if ssrErr != nil {
+			errChan <- fmt.Errorf("inertia-ssr-config: %w", ssrErr)
+		} else if ssrSettings.ShouldShadowfaxStart() {
+			ssrRebuild := make(chan struct{}, 1)
+			runner := &ssr.Runner{
+				Settings:       ssrSettings,
+				PackageManager: jsRuntime,
+				AddProcess:     addProcess,
+				Verbose:        verbose,
+			}
+			wg.Go(func() {
+				if err := watcher.RunSSRSourceWatcher(ctx, ssrRebuild, verbose); err != nil {
+					errChan <- fmt.Errorf("ssr-source-watcher: %w", err)
+				}
+			})
+			wg.Go(func() {
+				if err := runner.Run(ctx, ssrRebuild); err != nil {
+					errChan <- fmt.Errorf("inertia-ssr: %w", err)
+				}
+			})
+		} else if verbose && ssrSettings.Mode == "managed" {
+			fmt.Println("[shadowfax] INERTIA_SSR_MODE=managed: SSR owned by the Go application")
+		}
+
 		fmt.Printf("[shadowfax] Starting %s run dev (Inertia frontend)\n", jsRuntime)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := runJsDev(ctx, jsRuntime); err != nil {
 				errChan <- fmt.Errorf("%s-run-dev: %w", jsRuntime, err)
 			}
-		}()
+		})
 	} else if verbose {
 		fmt.Println("[shadowfax] Inertia frontend not detected")
 	}
@@ -213,13 +239,11 @@ func main() {
 			rebuildInProgress.Store(inProgress)
 		},
 	})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := appServer.Run(ctx, rebuildChan); err != nil {
 			errChan <- fmt.Errorf("app-server: %w", err)
 		}
-	}()
+	})
 
 	// Handle templ changes
 	go func() {
@@ -229,15 +253,15 @@ func main() {
 				return
 			case change := <-templChange:
 				switch change {
-			case watcher.TemplChangeNeedsBrowserReload:
-				if clearLogs != nil {
-					clearLogs()
-				}
-				if trk.HasErrorAt(state.IndexTempl) {
-					fmt.Println("[shadowfax] Templ has errors, skipping browser reload")
-					continue
-				}
-				if useTailwind {
+				case watcher.TemplChangeNeedsBrowserReload:
+					if clearLogs != nil {
+						clearLogs()
+					}
+					if trk.HasErrorAt(state.IndexTempl) {
+						fmt.Println("[shadowfax] Templ has errors, skipping browser reload")
+						continue
+					}
+					if useTailwind {
 						fmt.Println("[shadowfax] Template changed, triggering CSS rebuild")
 						if err := touchFile("./css/base.css"); err != nil {
 							fmt.Printf("[shadowfax] Warning: could not touch CSS file: %v\n", err)
@@ -274,6 +298,11 @@ func main() {
 	fmt.Printf("  TEMPL_DEV_MODE: enabled (fast template reloads)\n")
 	if useInertia {
 		fmt.Printf("  Inertia frontend: %s run dev (Vite dev server)\n", jsRuntime)
+		if ssrSettings.ShouldShadowfaxStart() {
+			fmt.Printf("  Inertia SSR:      external renderer at %s\n", ssrSettings.URL)
+		} else if ssrSettings.Mode == "managed" {
+			fmt.Println("  Inertia SSR:      managed by Go application")
+		}
 	}
 	fmt.Println()
 

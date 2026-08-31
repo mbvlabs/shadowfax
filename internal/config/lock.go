@@ -11,8 +11,32 @@ type AndurelLock struct {
 }
 
 type ScaffoldConfig struct {
-	Inertia           string `json:"inertia,omitempty"`
-	JavascriptRuntime string `json:"javascriptRuntime,omitempty"`
+	Inertia                  string `json:"inertia,omitempty"`
+	JavaScriptPackageManager string `json:"javascriptPackageManager,omitempty"`
+	InertiaSSRRuntime        string `json:"inertiaSSRRuntime,omitempty"`
+	JavascriptRuntime        string `json:"javascriptRuntime,omitempty"` // Deprecated: use JavaScriptPackageManager.
+}
+
+// PackageManager returns the configured JavaScript package manager.
+func (config *ScaffoldConfig) PackageManager() string {
+	if config == nil {
+		return "npm"
+	}
+	if config.JavaScriptPackageManager != "" {
+		return config.JavaScriptPackageManager
+	}
+	if config.JavascriptRuntime != "" {
+		return config.JavascriptRuntime
+	}
+	return "npm"
+}
+
+// SSRRuntime returns the JavaScript executable used for Inertia SSR.
+func (config *ScaffoldConfig) SSRRuntime() string {
+	if config == nil || config.InertiaSSRRuntime == "" {
+		return "node"
+	}
+	return config.InertiaSSRRuntime
 }
 
 func ReadAndurelLock(path string) (*AndurelLock, error) {
@@ -66,9 +90,9 @@ func GetJavascriptRuntime() (string, error) {
 		return "", err
 	}
 
-	if lock.ScaffoldConfig == nil || lock.ScaffoldConfig.JavascriptRuntime == "" {
+	if lock.ScaffoldConfig == nil {
 		return "npm", nil
 	}
 
-	return lock.ScaffoldConfig.JavascriptRuntime, nil
+	return lock.ScaffoldConfig.PackageManager(), nil
 }
