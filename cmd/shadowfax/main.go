@@ -54,6 +54,12 @@ func main() {
 		os.Exit(0)
 	}
 
+	runOpts, err := config.ParseRunOptions(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "shadowfax: %v\n", err)
+		os.Exit(2)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
 		cancel()
@@ -156,53 +162,26 @@ func main() {
 		fmt.Println("[shadowfax] Tailwind watcher disabled")
 	}
 
-	useInertia, err := config.ShouldUseInertia()
-	if err != nil && verbose {
-		fmt.Printf("[shadowfax] Inertia detection error: %v\n", err)
-	}
-
-	jsRuntime := "npm"
-	var ssrSettings config.SSRSettings
+	useInertia := runOpts.Inertia
+	jsRuntime := runOpts.PackageManager
 	if useInertia {
-		jsRuntime, err = config.GetJavascriptRuntime()
-		if err != nil && verbose {
-			fmt.Printf("[shadowfax] JS runtime detection error: %v\n", err)
-			jsRuntime = "npm"
+		ssrRebuild := make(chan struct{}, 1)
+		runner := &ssr.Runner{
+			Settings:       runOpts.SSRSettings(),
+			PackageManager: jsRuntime,
+			AddProcess:     addProcess,
+			Verbose:        verbose,
 		}
-
-		lock, lockErr := config.ReadAndurelLock("andurel.lock")
-		if lockErr != nil && verbose {
-			fmt.Printf("[shadowfax] andurel.lock read error: %v\n", lockErr)
-		}
-		var scaffold *config.ScaffoldConfig
-		if lock != nil {
-			scaffold = lock.ScaffoldConfig
-		}
-		var ssrErr error
-		ssrSettings, ssrErr = config.ReadSSRSettings(scaffold)
-		if ssrErr != nil {
-			errChan <- fmt.Errorf("inertia-ssr-config: %w", ssrErr)
-		} else if ssrSettings.ShouldShadowfaxStart() {
-			ssrRebuild := make(chan struct{}, 1)
-			runner := &ssr.Runner{
-				Settings:       ssrSettings,
-				PackageManager: jsRuntime,
-				AddProcess:     addProcess,
-				Verbose:        verbose,
+		wg.Go(func() {
+			if err := watcher.RunSSRSourceWatcher(ctx, ssrRebuild, verbose); err != nil {
+				errChan <- fmt.Errorf("ssr-source-watcher: %w", err)
 			}
-			wg.Go(func() {
-				if err := watcher.RunSSRSourceWatcher(ctx, ssrRebuild, verbose); err != nil {
-					errChan <- fmt.Errorf("ssr-source-watcher: %w", err)
-				}
-			})
-			wg.Go(func() {
-				if err := runner.Run(ctx, ssrRebuild); err != nil {
-					errChan <- fmt.Errorf("inertia-ssr: %w", err)
-				}
-			})
-		} else if verbose && ssrSettings.Mode == "managed" {
-			fmt.Println("[shadowfax] INERTIA_SSR_MODE=managed: SSR owned by the Go application")
-		}
+		})
+		wg.Go(func() {
+			if err := runner.Run(ctx, ssrRebuild); err != nil {
+				errChan <- fmt.Errorf("inertia-ssr: %w", err)
+			}
+		})
 
 		fmt.Printf("[shadowfax] Starting %s run dev (Inertia frontend)\n", jsRuntime)
 		wg.Go(func() {
@@ -211,7 +190,7 @@ func main() {
 			}
 		})
 	} else if verbose {
-		fmt.Println("[shadowfax] Inertia frontend not detected")
+		fmt.Println("[shadowfax] Inertia frontend disabled")
 	}
 
 	readyChan := make(chan struct{}, 1)
@@ -299,11 +278,7 @@ func main() {
 	fmt.Printf("  TEMPL_DEV_MODE: enabled (fast template reloads)\n")
 	if useInertia {
 		fmt.Printf("  Inertia frontend: %s run dev (Vite dev server)\n", jsRuntime)
-		if ssrSettings.ShouldShadowfaxStart() {
-			fmt.Printf("  Inertia SSR:      external renderer at %s\n", ssrSettings.URL)
-		} else if ssrSettings.Mode == "managed" {
-			fmt.Println("  Inertia SSR:      managed by Go application")
-		}
+		fmt.Printf("  Inertia SSR:      cmd/ssr at %s\n", runOpts.SSRURL)
 	}
 	fmt.Println()
 

@@ -45,33 +45,6 @@ func TestShouldUseTailwindIgnoresAndurelLock(t *testing.T) {
 	}
 }
 
-func TestAndurelLockScaffoldConfigOnlyIncludesSupportedFields(t *testing.T) {
-	tmp := t.TempDir()
-	lockPath := filepath.Join(tmp, "andurel.lock")
-	if err := os.WriteFile(lockPath, []byte(`{
-  "scaffoldConfig": {
-    "inertia": "react",
-    "javascriptRuntime": "bun"
-  }
-}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	lock, err := ReadAndurelLock(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lock.ScaffoldConfig == nil {
-		t.Fatal("expected scaffold config")
-	}
-	if lock.ScaffoldConfig.Inertia != "react" {
-		t.Fatalf("Inertia = %q, want react", lock.ScaffoldConfig.Inertia)
-	}
-	if lock.ScaffoldConfig.JavascriptRuntime != "bun" {
-		t.Fatalf("JavascriptRuntime = %q, want bun", lock.ScaffoldConfig.JavascriptRuntime)
-	}
-}
-
 func chdir(t *testing.T, dir string) {
 	t.Helper()
 
