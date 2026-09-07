@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/mbvlabs/shadowfax/internal/config"
 )
 
-// Runner owns the external Inertia SSR Node process during local development.
+// Runner owns the project's cmd/ssr process during local development.
 type Runner struct {
 	Settings       config.SSRSettings
 	PackageManager string
@@ -20,16 +21,16 @@ type Runner struct {
 
 	mu      sync.Mutex
 	command *exec.Cmd
+	binPath string
 }
 
-// Run builds the SSR bundle when needed, starts the Node renderer, and rebuilds
-// when rebuildChan signals a frontend source change.
+// Run ensures the JS SSR bundle exists, builds cmd/ssr, starts it, and restarts
+// after frontend rebuilds.
 func (runner *Runner) Run(ctx context.Context, rebuildChan <-chan struct{}) error {
 	if err := runner.ensureBundle(ctx); err != nil {
 		return err
 	}
-
-	if err := runner.start(ctx); err != nil {
+	if err := runner.buildAndStart(ctx); err != nil {
 		return err
 	}
 
@@ -47,7 +48,7 @@ func (runner *Runner) Run(ctx context.Context, rebuildChan <-chan struct{}) erro
 				continue
 			}
 			runner.stop()
-			if err := runner.start(ctx); err != nil {
+			if err := runner.buildAndStart(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "[shadowfax] SSR restart error: %v\n", err)
 			}
 		}
@@ -58,7 +59,11 @@ func (runner *Runner) ensureBundle(ctx context.Context) error {
 	if _, err := os.Stat(runner.Settings.Bundle); err == nil {
 		return nil
 	}
-	fmt.Printf("[shadowfax] SSR bundle %s missing, running %s run build:ssr\n", runner.Settings.Bundle, runner.PackageManager)
+	fmt.Printf(
+		"[shadowfax] SSR bundle %s missing, running %s run build:ssr\n",
+		runner.Settings.Bundle,
+		runner.PackageManager,
+	)
 	return runner.runBuild(ctx)
 }
 
@@ -74,6 +79,31 @@ func (runner *Runner) runBuild(ctx context.Context) error {
 	return cmd.Run()
 }
 
+func (runner *Runner) buildAndStart(ctx context.Context) error {
+	if err := runner.buildSSRBinary(ctx); err != nil {
+		return err
+	}
+	return runner.start(ctx)
+}
+
+func (runner *Runner) buildSSRBinary(ctx context.Context) error {
+	wd := mustWorkingDir()
+	binDir := filepath.Join(wd, "tmp", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return err
+	}
+	binPath := filepath.Join(binDir, "ssr")
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", binPath, "./cmd/ssr")
+	cmd.Dir = wd
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("build cmd/ssr: %w", err)
+	}
+	runner.binPath = binPath
+	return nil
+}
+
 func (runner *Runner) start(ctx context.Context) error {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
@@ -81,18 +111,17 @@ func (runner *Runner) start(ctx context.Context) error {
 	if runner.command != nil {
 		return nil
 	}
+	if runner.binPath == "" {
+		return fmt.Errorf("ssr binary path is empty")
+	}
 
-	cmd := exec.Command(runner.Settings.Runtime, runner.Settings.Bundle)
+	cmd := exec.Command(runner.binPath)
 	cmd.Dir = mustWorkingDir()
-	cmd.Env = append(os.Environ(),
-		"INERTIA_SSR_HOST="+runner.Settings.Host,
-		"INERTIA_SSR_PORT="+runner.Settings.Port,
-	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start inertia SSR runtime: %w", err)
+		return fmt.Errorf("start cmd/ssr: %w", err)
 	}
 
 	runner.command = cmd
@@ -100,7 +129,7 @@ func (runner *Runner) start(ctx context.Context) error {
 		runner.AddProcess(cmd)
 	}
 
-	fmt.Printf("[shadowfax] Inertia SSR listening on %s (external mode)\n", runner.Settings.URL)
+	fmt.Printf("[shadowfax] Inertia SSR (cmd/ssr) listening on %s\n", runner.Settings.URL)
 
 	go func() {
 		waitErr := cmd.Wait()
@@ -110,7 +139,7 @@ func (runner *Runner) start(ctx context.Context) error {
 		}
 		runner.mu.Unlock()
 		if waitErr != nil && ctx.Err() == nil {
-			fmt.Fprintf(os.Stderr, "[shadowfax] Inertia SSR process exited: %v\n", waitErr)
+			fmt.Fprintf(os.Stderr, "[shadowfax] cmd/ssr exited: %v\n", waitErr)
 		}
 	}()
 
@@ -118,7 +147,7 @@ func (runner *Runner) start(ctx context.Context) error {
 }
 
 func (runner *Runner) waitForHealth(ctx context.Context) error {
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
