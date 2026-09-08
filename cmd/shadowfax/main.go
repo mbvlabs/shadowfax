@@ -331,9 +331,7 @@ func cleanup() {
 
 	// Ask tracked child processes to stop first.
 	for _, cmd := range processes {
-		if cmd != nil && cmd.Process != nil {
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-		}
+		signalTrackedProcess(cmd, syscall.SIGTERM)
 	}
 
 	// Fallback to force kill only tracked child processes that are still alive.
@@ -343,7 +341,7 @@ func cleanup() {
 			continue
 		}
 		if processAlive(cmd.Process) {
-			_ = cmd.Process.Kill()
+			signalTrackedProcess(cmd, syscall.SIGKILL)
 		}
 	}
 
@@ -384,6 +382,19 @@ func processAlive(process *os.Process) bool {
 
 	err := process.Signal(syscall.Signal(0))
 	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+func signalTrackedProcess(cmd *exec.Cmd, sig syscall.Signal) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid && cmd.Process.Pid > 0 {
+		err := syscall.Kill(-cmd.Process.Pid, sig)
+		if err == nil || errors.Is(err, syscall.ESRCH) {
+			return
+		}
+	}
+	_ = cmd.Process.Signal(sig)
 }
 
 func runProxyServer(
