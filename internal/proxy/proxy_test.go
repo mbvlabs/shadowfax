@@ -114,6 +114,27 @@ func TestServeLocalAssetTimestampedPathFallback(t *testing.T) {
 	}
 }
 
+func TestModifyResponseDisablesHTMLCaching(t *testing.T) {
+	ps := &Server{}
+	original := "<html><head></head><body>ok</body></html>"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type":   []string{"text/html; charset=utf-8"},
+			"Content-Length": []string{strconv.Itoa(len(original))},
+		},
+		Body: io.NopCloser(strings.NewReader(original)),
+	}
+
+	if err := ps.modifyResponse(resp); err != nil {
+		t.Fatalf("modifyResponse returned error: %v", err)
+	}
+
+	if got := resp.Header.Get("Cache-Control"); !strings.Contains(got, "no-store") {
+		t.Fatalf("expected HTML Cache-Control to disable store, got %q", got)
+	}
+}
+
 func TestModifyResponseSkipsInjectionForHEAD(t *testing.T) {
 	ps := &Server{}
 	original := "<html><head></head><body>ok</body></html>"
