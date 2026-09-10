@@ -327,7 +327,7 @@ func (ps *Server) renderRestartPage(w http.ResponseWriter, r *http.Request) {
 </head>
 <body>
   <h1>Shadowfax: Development Server Restarting...</h1>
-  <p>Shadowfax is rebuilding your Go application. This page reconnects and reloads as soon as it is ready.</p>
+  <p>Shadowfax is restarting development services. This page reconnects and reloads as soon as it is ready.</p>
   <p><small>Upstream: <code>%s</code></small></p>
   %s
   <script>

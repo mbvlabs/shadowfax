@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -78,6 +79,79 @@ func TestRunnerStopFreesChildPort(t *testing.T) {
 		t.Fatalf("port %s should be free after stop: %v", addr, err)
 	}
 	_ = ln.Close()
+}
+
+func TestRunnerReadyCallbackTracksHealth(t *testing.T) {
+	port := freePort(t)
+	var mu sync.Mutex
+	var states []bool
+	runner := newFakeRunner(t, port, "parent")
+	runner.OnReadyStateChanged = func(ready bool) {
+		mu.Lock()
+		states = append(states, ready)
+		mu.Unlock()
+	}
+
+	if err := runner.start(t.Context()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(runner.stop)
+
+	mu.Lock()
+	afterStart := append([]bool(nil), states...)
+	mu.Unlock()
+	if len(afterStart) != 1 || !afterStart[0] {
+		t.Fatalf("after start, ready states = %v, want [true]", afterStart)
+	}
+
+	if err := checkHealth(t.Context(), runner.Settings.URL); err != nil {
+		t.Fatalf("health should succeed before ready callback: %v", err)
+	}
+
+	runner.stop()
+
+	mu.Lock()
+	afterStop := append([]bool(nil), states...)
+	mu.Unlock()
+	if len(afterStop) != 2 || afterStop[0] != true || afterStop[1] != false {
+		t.Fatalf("after stop, ready states = %v, want [true false]", afterStop)
+	}
+}
+
+func TestRunnerRestartNotifiesUnreadyThenReady(t *testing.T) {
+	port := freePort(t)
+	var mu sync.Mutex
+	var states []bool
+	runner := newFakeRunner(t, port, "parent")
+	runner.OnReadyStateChanged = func(ready bool) {
+		mu.Lock()
+		states = append(states, ready)
+		mu.Unlock()
+	}
+
+	ctx := t.Context()
+	if err := runner.start(ctx); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	t.Cleanup(runner.stop)
+
+	runner.stop()
+	if err := runner.start(ctx); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]bool(nil), states...)
+	mu.Unlock()
+	want := []bool{true, false, true}
+	if len(got) != len(want) {
+		t.Fatalf("ready states = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ready states = %v, want %v", got, want)
+		}
+	}
 }
 
 func TestRunnerKillsChildWhenParentIgnoresSIGTERM(t *testing.T) {

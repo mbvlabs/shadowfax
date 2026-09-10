@@ -92,10 +92,18 @@ func main() {
 	var wg sync.WaitGroup
 	errChan := make(chan error, 8)
 	var rebuildInProgress atomic.Bool
+	var ssrStarting atomic.Bool
+	if runOpts.Inertia {
+		ssrStarting.Store(true)
+	}
+
+	reloadBlocked := func() bool {
+		return rebuildInProgress.Load() || ssrStarting.Load()
+	}
 
 	// Start proxy server
 	wg.Go(func() {
-		if err := runProxyServer(ctx, proxyPort, appPort, broadcaster, rebuildInProgress.Load); err != nil {
+		if err := runProxyServer(ctx, proxyPort, appPort, broadcaster, reloadBlocked); err != nil {
 			errChan <- fmt.Errorf("proxy-server: %w", err)
 		}
 	})
@@ -149,11 +157,15 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-cssRebuilt:
-					if !rebuildInProgress.Load() {
+					if !reloadBlocked() {
 						fmt.Println("[shadowfax] CSS rebuilt, broadcasting reload")
 						broadcaster.Broadcast()
 					} else if verbose {
-						fmt.Println("[shadowfax] CSS rebuilt (server restart in progress, skipping broadcast)")
+						if ssrStarting.Load() {
+							fmt.Println("[shadowfax] CSS rebuilt (Inertia SSR not ready, skipping broadcast)")
+						} else {
+							fmt.Println("[shadowfax] CSS rebuilt (server restart in progress, skipping broadcast)")
+						}
 					}
 				}
 			}
@@ -171,6 +183,17 @@ func main() {
 			PackageManager: jsRuntime,
 			AddProcess:     addProcess,
 			Verbose:        verbose,
+			OnReadyStateChanged: func(ready bool) {
+				if ready {
+					ssrStarting.Store(false)
+					if !rebuildInProgress.Load() {
+						fmt.Println("[shadowfax] Inertia SSR ready, broadcasting reload")
+						broadcaster.Broadcast()
+					}
+					return
+				}
+				ssrStarting.Store(true)
+			},
 		}
 		wg.Go(func() {
 			if err := watcher.RunSSRSourceWatcher(ctx, ssrRebuild, verbose); err != nil {
