@@ -377,20 +377,18 @@ func (s *AppServer) startHealthMonitor(ctx context.Context, previousBinPath stri
 
 	go func() {
 		healthURL := fmt.Sprintf("http://localhost:%s/", s.appPort)
-		reload.BroadcastWhenHealthy(healthCtx, healthURL, s.broadcaster)
-		if healthCtx.Err() != nil {
-			return
-		}
-		if previousBinPath != "" {
-			os.Remove(previousBinPath)
-		}
-		s.setRebuildState(false)
-		if s.readyChan != nil {
-			select {
-			case s.readyChan <- struct{}{}:
-			default:
+		reload.BroadcastWhenHealthy(healthCtx, healthURL, s.broadcaster, func() {
+			if previousBinPath != "" {
+				os.Remove(previousBinPath)
 			}
-		}
+			s.setRebuildState(false)
+			if s.readyChan != nil {
+				select {
+				case s.readyChan <- struct{}{}:
+				default:
+				}
+			}
+		})
 	}()
 }
 

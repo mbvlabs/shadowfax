@@ -20,7 +20,6 @@ import (
 	"github.com/mbvlabs/shadowfax/internal/proxy"
 	"github.com/mbvlabs/shadowfax/internal/reload"
 	"github.com/mbvlabs/shadowfax/internal/server"
-	"github.com/mbvlabs/shadowfax/internal/ssr"
 	"github.com/mbvlabs/shadowfax/internal/state"
 	"github.com/mbvlabs/shadowfax/internal/watcher"
 )
@@ -92,13 +91,12 @@ func main() {
 	var wg sync.WaitGroup
 	errChan := make(chan error, 8)
 	var rebuildInProgress atomic.Bool
-	var ssrStarting atomic.Bool
-	if runOpts.Inertia {
-		ssrStarting.Store(true)
-	}
+
+	useInertia := runOpts.Inertia
+	jsRuntime := runOpts.PackageManager
 
 	reloadBlocked := func() bool {
-		return rebuildInProgress.Load() || ssrStarting.Load()
+		return rebuildInProgress.Load()
 	}
 
 	// Start proxy server
@@ -133,10 +131,13 @@ func main() {
 	if err != nil && verbose {
 		fmt.Printf("[shadowfax] Tailwind detection error: %v\n", err)
 	}
+	// Inertia apps use @tailwindcss/vite; the CLI watcher would full-reload
+	// the tab and fight Vite HMR.
+	useTailwindCLI := useTailwind && !useInertia
 
 	var cssRebuilt chan struct{}
 
-	if useTailwind {
+	if useTailwindCLI {
 		cssRebuilt = make(chan struct{}, 1)
 
 		// Start tailwind watcher
@@ -161,11 +162,7 @@ func main() {
 						fmt.Println("[shadowfax] CSS rebuilt, broadcasting reload")
 						broadcaster.Broadcast()
 					} else if verbose {
-						if ssrStarting.Load() {
-							fmt.Println("[shadowfax] CSS rebuilt (Inertia SSR not ready, skipping broadcast)")
-						} else {
-							fmt.Println("[shadowfax] CSS rebuilt (server restart in progress, skipping broadcast)")
-						}
+						fmt.Println("[shadowfax] CSS rebuilt (server restart in progress, skipping broadcast)")
 					}
 				}
 			}
@@ -174,38 +171,7 @@ func main() {
 		fmt.Println("[shadowfax] Tailwind watcher disabled")
 	}
 
-	useInertia := runOpts.Inertia
-	jsRuntime := runOpts.PackageManager
 	if useInertia {
-		ssrRebuild := make(chan struct{}, 1)
-		runner := &ssr.Runner{
-			Settings:       runOpts.SSRSettings(),
-			PackageManager: jsRuntime,
-			AddProcess:     addProcess,
-			Verbose:        verbose,
-			OnReadyStateChanged: func(ready bool) {
-				if ready {
-					ssrStarting.Store(false)
-					if !rebuildInProgress.Load() {
-						fmt.Println("[shadowfax] Inertia SSR ready, broadcasting reload")
-						broadcaster.Broadcast()
-					}
-					return
-				}
-				ssrStarting.Store(true)
-			},
-		}
-		wg.Go(func() {
-			if err := watcher.RunSSRSourceWatcher(ctx, ssrRebuild, verbose); err != nil {
-				errChan <- fmt.Errorf("ssr-source-watcher: %w", err)
-			}
-		})
-		wg.Go(func() {
-			if err := runner.Run(ctx, ssrRebuild); err != nil {
-				errChan <- fmt.Errorf("inertia-ssr: %w", err)
-			}
-		})
-
 		fmt.Printf("[shadowfax] Starting %s run dev (Inertia frontend)\n", jsRuntime)
 		wg.Go(func() {
 			if err := runJsDev(ctx, jsRuntime); err != nil {
@@ -264,7 +230,7 @@ func main() {
 						fmt.Println("[shadowfax] Templ has errors, skipping browser reload")
 						continue
 					}
-					if useTailwind {
+					if useTailwindCLI {
 						fmt.Println("[shadowfax] Template changed, triggering CSS rebuild")
 						if err := touchFile("./css/base.css"); err != nil {
 							fmt.Printf("[shadowfax] Warning: could not touch CSS file: %v\n", err)
@@ -281,7 +247,7 @@ func main() {
 						continue
 					}
 					fmt.Println("[shadowfax] Template Go code changed, rebuilding")
-					if useTailwind {
+					if useTailwindCLI {
 						rebuildInProgress.Store(true)
 						if err := touchFile("./css/base.css"); err != nil && verbose {
 							fmt.Printf("[shadowfax] Warning: could not touch CSS file: %v\n", err)
@@ -301,7 +267,7 @@ func main() {
 	fmt.Printf("  TEMPL_DEV_MODE: enabled (fast template reloads)\n")
 	if useInertia {
 		fmt.Printf("  Inertia frontend: %s run dev (Vite dev server)\n", jsRuntime)
-		fmt.Printf("  Inertia SSR:      cmd/ssr at %s\n", runOpts.SSRURL)
+		fmt.Printf("  Inertia SSR:      Vite /__inertia_ssr\n")
 	}
 	fmt.Println()
 
