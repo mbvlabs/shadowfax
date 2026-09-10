@@ -106,6 +106,70 @@ func TestCSSRebuiltSuppressedDuringRestart(t *testing.T) {
 	}
 }
 
+// TestCSSRebuiltSuppressedWhileSSRStarting verifies that a CSS rebuild does
+// not reload the browser while Inertia SSR is still starting. Reloading in
+// that window makes the app POST /render before cmd/ssr is listening.
+func TestCSSRebuiltSuppressedWhileSSRStarting(t *testing.T) {
+	broadcaster := reload.NewBroadcaster()
+	listener := broadcaster.Subscribe()
+	defer broadcaster.Unsubscribe(listener)
+
+	cssRebuilt := make(chan struct{}, 1)
+	var rebuildInProgress atomic.Bool
+	var ssrStarting atomic.Bool
+	ssrStarting.Store(true)
+
+	reloadBlocked := func() bool {
+		return rebuildInProgress.Load() || ssrStarting.Load()
+	}
+
+	go func() {
+		<-cssRebuilt
+		if !reloadBlocked() {
+			broadcaster.Broadcast()
+		}
+	}()
+
+	cssRebuilt <- struct{}{}
+
+	select {
+	case <-listener:
+		t.Fatal("should not broadcast CSS rebuild while Inertia SSR is starting")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestSSRReadyBroadcastsWhenIdle verifies that becoming SSR-healthy reloads
+// the browser so a CSS rebuild that arrived during startup is not lost.
+func TestSSRReadyBroadcastsWhenIdle(t *testing.T) {
+	broadcaster := reload.NewBroadcaster()
+	listener := broadcaster.Subscribe()
+	defer broadcaster.Unsubscribe(listener)
+
+	var rebuildInProgress atomic.Bool
+	var ssrStarting atomic.Bool
+	ssrStarting.Store(true)
+
+	onReadyStateChanged := func(ready bool) {
+		if ready {
+			ssrStarting.Store(false)
+			if !rebuildInProgress.Load() {
+				broadcaster.Broadcast()
+			}
+		} else {
+			ssrStarting.Store(true)
+		}
+	}
+
+	onReadyStateChanged(true)
+
+	select {
+	case <-listener:
+	case <-time.After(time.Second):
+		t.Fatal("expected broadcast when Inertia SSR becomes ready")
+	}
+}
+
 // TestReadyChanClearsRebuildInProgress verifies that the app server's ready
 // signal allows subsequent CSS rebuilds to broadcast again.
 func TestReadyChanClearsRebuildInProgress(t *testing.T) {
