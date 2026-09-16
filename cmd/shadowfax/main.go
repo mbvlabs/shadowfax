@@ -23,7 +23,6 @@ import (
 	"github.com/mbvlabs/shadowfax/internal/queue"
 	"github.com/mbvlabs/shadowfax/internal/reload"
 	"github.com/mbvlabs/shadowfax/internal/server"
-	"github.com/mbvlabs/shadowfax/internal/ssr"
 	"github.com/mbvlabs/shadowfax/internal/state"
 	"github.com/mbvlabs/shadowfax/internal/tui"
 	"github.com/mbvlabs/shadowfax/internal/watcher"
@@ -110,11 +109,18 @@ func main() {
 	errChan := make(chan error, 8)
 	var rebuildInProgress atomic.Bool
 
+	useInertia := runOpts.Inertia
+	jsRuntime := runOpts.PackageManager
+
+	reloadBlocked := func() bool {
+		return rebuildInProgress.Load()
+	}
+
 	go ctxrun.Fanout(ctx, rebuildChan, appRebuild, queueRebuild)
 
 	// Start proxy server
 	wg.Go(func() {
-		if err := runProxyServer(ctx, proxyPort, appPort, broadcaster, rebuildInProgress.Load); err != nil {
+		if err := runProxyServer(ctx, proxyPort, appPort, broadcaster, reloadBlocked); err != nil {
 			errChan <- fmt.Errorf("proxy-server: %w", err)
 		}
 	})
@@ -148,10 +154,13 @@ func main() {
 	if err != nil && verbose {
 		fmt.Fprintf(buildLog, "[shadowfax] Tailwind detection error: %v\n", err)
 	}
+	// Inertia apps use @tailwindcss/vite; the CLI watcher would full-reload
+	// the tab and fight Vite HMR.
+	useTailwindCLI := useTailwind && !useInertia
 
 	var cssRebuilt chan struct{}
 
-	if useTailwind {
+	if useTailwindCLI {
 		cssRebuilt = make(chan struct{}, 1)
 
 		// Start tailwind watcher
@@ -173,7 +182,7 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-cssRebuilt:
-					if !rebuildInProgress.Load() {
+					if !reloadBlocked() {
 						fmt.Fprintln(buildLog, "[shadowfax] CSS rebuilt, broadcasting reload")
 						broadcaster.Broadcast()
 					} else if verbose {
@@ -186,32 +195,7 @@ func main() {
 		fmt.Fprintln(buildLog, "[shadowfax] Tailwind watcher disabled")
 	}
 
-	useInertia := runOpts.Inertia
-	jsRuntime := runOpts.PackageManager
 	if useInertia {
-		ssrRebuild := make(chan struct{}, 1)
-		runner := &ssr.Runner{
-			Settings:       runOpts.SSRSettings(),
-			PackageManager: jsRuntime,
-			AddProcess:     addProcess,
-			Verbose:        verbose,
-			BuildOut:       buildLog,
-			RuntimeOut:     hub.PrefixWriter(tui.StreamApp, "[ssr] "),
-			Log:            buildLog,
-		}
-		wg.Go(func() {
-			if err := watcher.RunSSRSourceWatcher(ctx, ssrRebuild, verbose, buildLog); err != nil {
-				errChan <- fmt.Errorf("ssr-source-watcher: %w", err)
-			}
-		})
-		wg.Go(func() {
-			if err := runner.Run(ctx, ssrRebuild); err != nil {
-				fmt.Fprintf(buildLog, "[shadowfax] inertia SSR stopped: %v\n", err)
-				hub.SetStatus(tui.StreamBuild, tui.StatusError)
-				<-ctx.Done()
-			}
-		})
-
 		fmt.Fprintf(buildLog, "[shadowfax] Starting %s run dev (Inertia frontend)\n", jsRuntime)
 		wg.Go(func() {
 			if err := runJsDev(ctx, jsRuntime, buildLog); err != nil {
@@ -308,7 +292,7 @@ func main() {
 						fmt.Fprintln(buildLog, "[shadowfax] Templ has errors, skipping browser reload")
 						continue
 					}
-					if useTailwind {
+					if useTailwindCLI {
 						fmt.Fprintln(buildLog, "[shadowfax] Template changed, triggering CSS rebuild")
 						if err := touchFile("./css/base.css"); err != nil {
 							fmt.Fprintf(buildLog, "[shadowfax] Warning: could not touch CSS file: %v\n", err)
@@ -325,7 +309,7 @@ func main() {
 						continue
 					}
 					fmt.Fprintln(buildLog, "[shadowfax] Template Go code changed, rebuilding")
-					if useTailwind {
+					if useTailwindCLI {
 						rebuildInProgress.Store(true)
 						if err := touchFile("./css/base.css"); err != nil && verbose {
 							fmt.Fprintf(buildLog, "[shadowfax] Warning: could not touch CSS file: %v\n", err)
@@ -345,7 +329,7 @@ func main() {
 	fmt.Fprintf(buildLog, "  TEMPL_DEV_MODE: enabled (fast template reloads)\n")
 	if useInertia {
 		fmt.Fprintf(buildLog, "  Inertia frontend: %s run dev (Vite dev server)\n", jsRuntime)
-		fmt.Fprintf(buildLog, "  Inertia SSR:      cmd/ssr at %s\n", runOpts.SSRURL)
+		fmt.Fprintf(buildLog, "  Inertia SSR:      Vite /__inertia_ssr\n")
 	}
 	fmt.Fprintln(buildLog)
 

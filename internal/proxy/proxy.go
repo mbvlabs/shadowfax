@@ -130,8 +130,15 @@ func (ps *Server) modifyResponse(resp *http.Response) error {
 	resp.Body = io.NopCloser(bytes.NewReader(finalBody))
 	resp.ContentLength = int64(len(finalBody))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(finalBody)))
+	disableDocumentCache(resp.Header)
 
 	return nil
+}
+
+func disableDocumentCache(header http.Header) {
+	header.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	header.Set("Pragma", "no-cache")
+	header.Set("Expires", "0")
 }
 
 func isBodylessResponse(resp *http.Response) bool {
@@ -327,7 +334,7 @@ func (ps *Server) renderRestartPage(w http.ResponseWriter, r *http.Request) {
 </head>
 <body>
   <h1>Shadowfax: Development Server Restarting...</h1>
-  <p>Shadowfax is rebuilding your Go application. This page reconnects and reloads as soon as it is ready.</p>
+  <p>Shadowfax is restarting development services. This page reconnects and reloads as soon as it is ready.</p>
   <p><small>Upstream: <code>%s</code></small></p>
   %s
   <script>

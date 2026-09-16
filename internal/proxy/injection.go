@@ -15,6 +15,17 @@ const HotReloadScript = `<script>
   var reconnectDelay = 1000;
   var maxReconnectDelay = 5000;
 
+  function reloadPage() {
+    console.log('[shadowfax] Reloading page...');
+    window.location.reload();
+  }
+
+  window.addEventListener('pageshow', function(event) {
+    if (event.persisted) {
+      reloadPage();
+    }
+  });
+
   function connect() {
     var ws = new WebSocket(wsUrl);
 
@@ -25,8 +36,7 @@ const HotReloadScript = `<script>
 
     ws.onmessage = function(event) {
       if (event.data === 'r') {
-        console.log('[shadowfax] Reloading page...');
-        window.location.reload();
+        reloadPage();
       }
     };
 

@@ -40,12 +40,12 @@ func ParseRunOptions(args []string) (RunOptions, error) {
 	fs := flag.NewFlagSet("shadowfax", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
-	inertia := fs.Bool("inertia", false, "enable Inertia Vite + cmd/ssr processes")
+	inertia := fs.Bool("inertia", false, "enable Inertia Vite dev server")
 	inline := fs.Bool("inline", false, "print interleaved logs instead of the interactive TUI")
 	packageManager := fs.String(
 		"js-package-manager",
 		defaultPackageManager,
-		"JavaScript package manager for Vite and build:ssr",
+		"JavaScript package manager for Vite",
 	)
 	ssrURL := fs.String("ssr-url", defaultSSRURL, "SSR renderer base URL (must match app config)")
 	ssrBundle := fs.String(

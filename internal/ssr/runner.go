@@ -24,19 +24,21 @@ const (
 
 // Runner owns the project's cmd/ssr process during local development.
 type Runner struct {
-	Settings       config.SSRSettings
-	PackageManager string
-	AddProcess     func(*exec.Cmd)
-	Verbose        bool
-	BuildOut       io.Writer
-	RuntimeOut     io.Writer
-	Log            io.Writer
+	Settings            config.SSRSettings
+	PackageManager      string
+	AddProcess          func(*exec.Cmd)
+	Verbose             bool
+	BuildOut            io.Writer
+	RuntimeOut          io.Writer
+	Log                 io.Writer
+	OnReadyStateChanged func(ready bool)
 
 	mu          sync.Mutex
 	command     *exec.Cmd
 	binPath     string
 	done        chan struct{}
 	stopTimeout time.Duration
+	ready       bool
 }
 
 // Run ensures the JS SSR bundle exists, builds cmd/ssr, starts it, and restarts
@@ -62,8 +64,14 @@ func (runner *Runner) Run(ctx context.Context, rebuildChan <-chan struct{}) erro
 				runner.logf("[shadowfax] SSR rebuild error: %v\n", err)
 				continue
 			}
+			// Build the replacement binary before stopping the old process so
+			// /render stays available during the (slow) go build.
+			if err := runner.buildSSRBinary(ctx); err != nil {
+				runner.logf("[shadowfax] SSR restart error: %v\n", err)
+				continue
+			}
 			runner.stop()
-			if err := runner.buildAndStart(ctx); err != nil {
+			if err := runner.start(ctx); err != nil {
 				runner.logf("[shadowfax] SSR restart error: %v\n", err)
 			}
 		}
@@ -151,8 +159,6 @@ func (runner *Runner) start(ctx context.Context) error {
 	}
 	runner.mu.Unlock()
 
-	runner.logf("[shadowfax] Inertia SSR (cmd/ssr) listening on %s\n", runner.Settings.URL)
-
 	go func() {
 		waitErr := cmd.Wait()
 		close(done)
@@ -172,7 +178,24 @@ func (runner *Runner) start(ctx context.Context) error {
 		runner.stop()
 		return err
 	}
+
+	runner.logf("[shadowfax] Inertia SSR (cmd/ssr) listening on %s\n", runner.Settings.URL)
+	runner.setReady(true)
 	return nil
+}
+
+func (runner *Runner) setReady(ready bool) {
+	runner.mu.Lock()
+	if runner.ready == ready {
+		runner.mu.Unlock()
+		return
+	}
+	runner.ready = ready
+	callback := runner.OnReadyStateChanged
+	runner.mu.Unlock()
+	if callback != nil {
+		callback(ready)
+	}
 }
 
 func (runner *Runner) waitForHealth(ctx context.Context, done <-chan struct{}) error {
@@ -209,6 +232,8 @@ func (runner *Runner) waitForHealth(ctx context.Context, done <-chan struct{}) e
 }
 
 func (runner *Runner) stop() {
+	runner.setReady(false)
+
 	runner.mu.Lock()
 	cmd := runner.command
 	done := runner.done
