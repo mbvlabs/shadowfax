@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -27,6 +28,9 @@ type Runner struct {
 	PackageManager string
 	AddProcess     func(*exec.Cmd)
 	Verbose        bool
+	BuildOut       io.Writer
+	RuntimeOut     io.Writer
+	Log            io.Writer
 
 	mu          sync.Mutex
 	command     *exec.Cmd
@@ -52,15 +56,15 @@ func (runner *Runner) Run(ctx context.Context, rebuildChan <-chan struct{}) erro
 			return nil
 		case <-rebuildChan:
 			if runner.Verbose {
-				fmt.Println("[shadowfax] Frontend changed, rebuilding SSR bundle")
+				runner.logf("[shadowfax] Frontend changed, rebuilding SSR bundle\n")
 			}
 			if err := runner.rebuild(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "[shadowfax] SSR rebuild error: %v\n", err)
+				runner.logf("[shadowfax] SSR rebuild error: %v\n", err)
 				continue
 			}
 			runner.stop()
 			if err := runner.buildAndStart(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "[shadowfax] SSR restart error: %v\n", err)
+				runner.logf("[shadowfax] SSR restart error: %v\n", err)
 			}
 		}
 	}
@@ -70,7 +74,7 @@ func (runner *Runner) ensureBundle(ctx context.Context) error {
 	if _, err := os.Stat(runner.Settings.Bundle); err == nil {
 		return nil
 	}
-	fmt.Printf(
+	runner.logf(
 		"[shadowfax] SSR bundle %s missing, running %s run build:ssr\n",
 		runner.Settings.Bundle,
 		runner.PackageManager,
@@ -85,8 +89,8 @@ func (runner *Runner) rebuild(ctx context.Context) error {
 func (runner *Runner) runBuild(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, runner.PackageManager, "run", "build:ssr")
 	cmd.Dir = mustWorkingDir()
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = runner.buildWriter()
+	cmd.Stderr = runner.buildWriter()
 	return cmd.Run()
 }
 
@@ -106,8 +110,8 @@ func (runner *Runner) buildSSRBinary(ctx context.Context) error {
 	binPath := filepath.Join(binDir, "ssr")
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", binPath, "./cmd/ssr")
 	cmd.Dir = wd
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = runner.buildWriter()
+	cmd.Stderr = runner.buildWriter()
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("build cmd/ssr: %w", err)
 	}
@@ -128,8 +132,8 @@ func (runner *Runner) start(ctx context.Context) error {
 
 	cmd := exec.Command(runner.binPath)
 	cmd.Dir = mustWorkingDir()
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = runner.runtimeWriter()
+	cmd.Stderr = runner.runtimeWriter()
 	// Put cmd/ssr in its own process group so a later kill reaches the Node
 	// child that actually binds the SSR port.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -147,7 +151,7 @@ func (runner *Runner) start(ctx context.Context) error {
 	}
 	runner.mu.Unlock()
 
-	fmt.Printf("[shadowfax] Inertia SSR (cmd/ssr) listening on %s\n", runner.Settings.URL)
+	runner.logf("[shadowfax] Inertia SSR (cmd/ssr) listening on %s\n", runner.Settings.URL)
 
 	go func() {
 		waitErr := cmd.Wait()
@@ -160,7 +164,7 @@ func (runner *Runner) start(ctx context.Context) error {
 		}
 		runner.mu.Unlock()
 		if waitErr != nil && ctx.Err() == nil && !stale {
-			fmt.Fprintf(os.Stderr, "[shadowfax] cmd/ssr exited: %v\n", waitErr)
+			runner.logf("[shadowfax] cmd/ssr exited: %v\n", waitErr)
 		}
 	}()
 
@@ -309,4 +313,29 @@ func mustWorkingDir() string {
 		return "."
 	}
 	return wd
+}
+
+func (runner *Runner) logf(format string, args ...any) {
+	fmt.Fprintf(runner.logWriter(), format, args...)
+}
+
+func (runner *Runner) logWriter() io.Writer {
+	if runner.Log != nil {
+		return runner.Log
+	}
+	return os.Stdout
+}
+
+func (runner *Runner) buildWriter() io.Writer {
+	if runner.BuildOut != nil {
+		return runner.BuildOut
+	}
+	return os.Stdout
+}
+
+func (runner *Runner) runtimeWriter() io.Writer {
+	if runner.RuntimeOut != nil {
+		return runner.RuntimeOut
+	}
+	return os.Stdout
 }

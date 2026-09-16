@@ -42,6 +42,9 @@ type AppServer struct {
 	runtimeOutputThreshold int
 	stdout                 io.Writer
 	stderr                 io.Writer
+	buildOut               io.Writer
+	log                    io.Writer
+	onStatus               func(string)
 }
 
 type Config struct {
@@ -52,6 +55,11 @@ type Config struct {
 	OnRebuildStateChanged func(bool)
 	StateTracker          *state.Tracker
 	ClearLogs             func()
+	Stdout                io.Writer
+	Stderr                io.Writer
+	BuildOut              io.Writer
+	Log                   io.Writer
+	OnStatus              func(string)
 }
 
 func (s *AppServer) makeBinaryPath() string {
@@ -64,7 +72,7 @@ func NewAppServer(cfg Config) *AppServer {
 	templDir := wd + "/tmp/templ"
 	os.MkdirAll(binDir, 0755)
 	os.MkdirAll(templDir, 0755)
-	return &AppServer{
+	s := &AppServer{
 		buildCmd:              "go build -o tmp/bin/main cmd/app/main.go",
 		binDir:                binDir,
 		templDir:              templDir,
@@ -76,8 +84,14 @@ func NewAppServer(cfg Config) *AppServer {
 		stateTracker:          cfg.StateTracker,
 		clearLogs:             cfg.ClearLogs,
 		buildRunner:           ctxrun.New(),
-		runBuild:              runGoBuild,
+		stdout:                cfg.Stdout,
+		stderr:                cfg.Stderr,
+		buildOut:              cfg.BuildOut,
+		log:                   cfg.Log,
+		onStatus:              cfg.OnStatus,
 	}
+	s.runBuild = s.goBuild
+	return s
 }
 
 func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error {
@@ -85,10 +99,12 @@ func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error 
 	s.runtimeRestartChan = runtimeRestartChan
 
 	s.setRebuildState(true)
+	s.setStatus("starting")
 	s.buildRunner.Go(ctx, func(buildCtx context.Context) {
 		if err := s.rebuild(buildCtx, ctx); err != nil {
-			fmt.Printf("[shadowfax] Initial build failed: %v\n", err)
+			s.logBuildf("[shadowfax] Initial build failed: %v\n", err)
 			s.setRebuildState(false)
+			s.setStatus("error")
 		}
 	})
 
@@ -99,23 +115,27 @@ func (s *AppServer) Run(ctx context.Context, rebuildChan <-chan struct{}) error 
 			return nil
 		case <-rebuildChan:
 			s.setRebuildState(true)
+			s.setStatus("starting")
 			s.buildRunner.Go(ctx, func(buildCtx context.Context) {
 				if err := s.rebuild(buildCtx, ctx); err != nil {
-					fmt.Printf("[shadowfax] Build failed: %v\n", err)
+					s.logBuildf("[shadowfax] Build failed: %v\n", err)
 					s.setRebuildState(false)
+					s.setStatus("error")
 				}
 			})
 		case <-runtimeRestartChan:
-			fmt.Println("[shadowfax] Repeated missing-file output detected, restarting app...")
+			s.logf("[shadowfax] Repeated missing-file output detected, restarting app...\n")
 			s.setRebuildState(true)
+			s.setStatus("starting")
 			s.buildRunner.Go(ctx, func(buildCtx context.Context) {
 				if err := waitForRuntimeRestart(buildCtx, s.runtimeRestartBackoff()); err != nil {
 					s.setRebuildState(false)
 					return
 				}
 				if err := s.rebuild(buildCtx, ctx); err != nil {
-					fmt.Printf("[shadowfax] Runtime restart failed: %v\n", err)
+					s.logBuildf("[shadowfax] Runtime restart failed: %v\n", err)
 					s.setRebuildState(false)
+					s.setStatus("error")
 				}
 			})
 		}
@@ -129,11 +149,11 @@ func (s *AppServer) rebuild(buildCtx context.Context, appCtx context.Context) er
 		s.clearLogs()
 	}
 
-	fmt.Println("[shadowfax] Building...")
+	s.logBuildf("[shadowfax] Building...\n")
 
 	runBuild := s.runBuild
 	if runBuild == nil {
-		runBuild = runGoBuild
+		runBuild = s.goBuild
 	}
 
 	if err := runBuild(buildCtx, candidateBinPath); err != nil {
@@ -164,7 +184,7 @@ func (s *AppServer) rebuild(buildCtx context.Context, appCtx context.Context) er
 	previousBinPath := s.binPath
 	s.stopLocked()
 
-	fmt.Println("[shadowfax] Starting server...")
+	s.logf("[shadowfax] Starting server...\n")
 	cmd := exec.CommandContext(appCtx, candidateBinPath)
 	cmd.Env = append(os.Environ(), "TEMPL_DEV_MODE=true", "TMPDIR="+s.templDir)
 
@@ -203,10 +223,11 @@ func (s *AppServer) rebuild(buildCtx context.Context, appCtx context.Context) er
 	return nil
 }
 
-func runGoBuild(ctx context.Context, outputPath string) error {
+func (s *AppServer) goBuild(ctx context.Context, outputPath string) error {
 	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", outputPath, "cmd/app/main.go")
-	buildCmd.Stdout = os.Stdout
-	buildCmd.Stderr = os.Stderr
+	out := s.buildWriter()
+	buildCmd.Stdout = out
+	buildCmd.Stderr = out
 	return buildCmd.Run()
 }
 
@@ -258,6 +279,34 @@ func (s *AppServer) stderrWriter() io.Writer {
 		return s.stderr
 	}
 	return os.Stderr
+}
+
+func (s *AppServer) buildWriter() io.Writer {
+	if s.buildOut != nil {
+		return s.buildOut
+	}
+	return os.Stdout
+}
+
+func (s *AppServer) logWriter() io.Writer {
+	if s.log != nil {
+		return s.log
+	}
+	return os.Stdout
+}
+
+func (s *AppServer) logf(format string, args ...any) {
+	fmt.Fprintf(s.logWriter(), format, args...)
+}
+
+func (s *AppServer) logBuildf(format string, args ...any) {
+	fmt.Fprintf(s.buildWriter(), format, args...)
+}
+
+func (s *AppServer) setStatus(status string) {
+	if s.onStatus != nil {
+		s.onStatus(status)
+	}
 }
 
 type runtimeOutputGuard struct {
@@ -385,6 +434,7 @@ func (s *AppServer) startHealthMonitor(ctx context.Context, previousBinPath stri
 			os.Remove(previousBinPath)
 		}
 		s.setRebuildState(false)
+		s.setStatus("ready")
 		if s.readyChan != nil {
 			select {
 			case s.readyChan <- struct{}{}:

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"time"
@@ -34,6 +35,7 @@ type TemplWatcherConfig struct {
 	Verbose    bool
 	AddProcess func(*exec.Cmd)
 	OnTemplErr func(msg string)
+	Log        io.Writer
 }
 
 func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg TemplWatcherConfig) error {
@@ -59,7 +61,7 @@ func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg Te
 		return fmt.Errorf("obtaining stderr pipe: %w", err)
 	}
 
-	fmt.Println("[shadowfax] Starting templ generate --watch")
+	logf(cfg.Log, "[shadowfax] Starting templ generate --watch\n")
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting templ: %w", err)
 	}
@@ -77,19 +79,19 @@ func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg Te
 
 			// Print templ output for debugging
 			if cfg.Verbose {
-				fmt.Printf("[templ] %s\n", line)
+				logf(cfg.Log, "[templ] %s\n", line)
 			}
 
 			switch {
 			case bytes.HasPrefix(b, bytesPrefixWarning):
-				fmt.Printf("[shadowfax] templ warning: %s\n", line)
+				logf(cfg.Log, "[shadowfax] templ warning: %s\n", line)
 			case bytes.HasPrefix(b, bytesPrefixErr):
-				fmt.Printf("[shadowfax] templ error: %s\n", line)
+				logf(cfg.Log, "[shadowfax] templ error: %s\n", line)
 				if cfg.OnTemplErr != nil {
 					cfg.OnTemplErr(line)
 				}
 			case bytes.HasPrefix(b, bytesPrefixErrCleared):
-				fmt.Println("[shadowfax] templ error cleared")
+				logf(cfg.Log, "[shadowfax] templ error cleared\n")
 				if cfg.OnTemplErr != nil {
 					cfg.OnTemplErr("")
 				}
@@ -98,13 +100,13 @@ func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg Te
 			if after, found := bytes.CutPrefix(b, bytesPrefixPostGenEvent); found {
 				switch {
 				case bytes.Contains(after, bytesNeedsRestart):
-					fmt.Println("[shadowfax] templ: needs restart (Go code changed)")
+					logf(cfg.Log, "[shadowfax] templ: needs restart (Go code changed)\n")
 					select {
 					case templChange <- TemplChangeNeedsRestart:
 					default:
 					}
 				case bytes.Contains(after, bytesNeedsBrowserReload):
-					fmt.Println("[shadowfax] templ: needs browser reload (template content changed)")
+					logf(cfg.Log, "[shadowfax] templ: needs browser reload (template content changed)\n")
 					select {
 					case templChange <- TemplChangeNeedsBrowserReload:
 					default:
@@ -113,7 +115,7 @@ func RunTemplWatcher(ctx context.Context, templChange chan<- TemplChange, cfg Te
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			fmt.Printf("[shadowfax] error scanning templ output: %v\n", err)
+			logf(cfg.Log, "[shadowfax] error scanning templ output: %v\n", err)
 		}
 		done <- cmd.Wait()
 	}()
@@ -144,12 +146,19 @@ func stopTemplProcess(cmd *exec.Cmd, done <-chan error) {
 	}
 
 	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		fmt.Printf("[shadowfax] templ kill fallback error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[shadowfax] templ kill fallback error: %v\n", err)
 	}
 
 	select {
 	case <-done:
 	case <-time.After(250 * time.Millisecond):
-		fmt.Println("[shadowfax] templ did not exit after kill fallback")
+		fmt.Fprintln(os.Stderr, "[shadowfax] templ did not exit after kill fallback")
 	}
+}
+
+func logf(w io.Writer, format string, args ...any) {
+	if w == nil {
+		w = os.Stdout
+	}
+	fmt.Fprintf(w, format, args...)
 }

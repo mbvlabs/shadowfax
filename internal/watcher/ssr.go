@@ -3,7 +3,7 @@ package watcher
 import (
 	"context"
 	"errors"
-	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +13,7 @@ import (
 )
 
 // RunSSRSourceWatcher watches frontend sources and signals SSR bundle rebuilds.
-func RunSSRSourceWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbose bool) error {
+func RunSSRSourceWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbose bool, log io.Writer) error {
 	root := filepath.Join(mustWorkingDir(), "resources", "js")
 	if _, err := os.Stat(root); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -47,7 +47,7 @@ func RunSSRSourceWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbo
 			if event.Op&fsnotify.Create != 0 {
 				if stat, statErr := os.Stat(event.Name); statErr == nil && stat.IsDir() {
 					if err := addWatchRecursive(watcher, event.Name); err != nil && verbose {
-						fmt.Printf("[shadowfax] failed to watch SSR source directory %s: %v\n", event.Name, err)
+						logf(log, "[shadowfax] failed to watch SSR source directory %s: %v\n", event.Name, err)
 					}
 					continue
 				}
@@ -65,7 +65,7 @@ func RunSSRSourceWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbo
 			}
 			debounceTimer = time.AfterFunc(debounceDelay, func() {
 				if verbose {
-					fmt.Printf("[shadowfax] SSR source changed: %s\n", filepath.Base(event.Name))
+					logf(log, "[shadowfax] SSR source changed: %s\n", filepath.Base(event.Name))
 				}
 				select {
 				case rebuildChan <- struct{}{}:
@@ -77,7 +77,7 @@ func RunSSRSourceWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbo
 				return nil
 			}
 			if verbose {
-				fmt.Printf("[shadowfax] SSR source watcher error: %v\n", err)
+				logf(log, "[shadowfax] SSR source watcher error: %v\n", err)
 			}
 		}
 	}
