@@ -18,6 +18,7 @@ const (
 // RunOptions is the explicit contract passed by `andurel run`.
 type RunOptions struct {
 	Inertia        bool
+	Inline         bool
 	PackageManager string
 	SSRURL         string
 	SSRBundle      string
@@ -40,6 +41,7 @@ func ParseRunOptions(args []string) (RunOptions, error) {
 	fs.SetOutput(os.Stderr)
 
 	inertia := fs.Bool("inertia", false, "enable Inertia Vite dev server")
+	inline := fs.Bool("inline", false, "print interleaved logs instead of the interactive TUI")
 	packageManager := fs.String(
 		"js-package-manager",
 		defaultPackageManager,
@@ -58,6 +60,7 @@ func ParseRunOptions(args []string) (RunOptions, error) {
 
 	opts := RunOptions{
 		Inertia:        *inertia,
+		Inline:         *inline,
 		PackageManager: strings.TrimSpace(*packageManager),
 		SSRURL:         strings.TrimSpace(*ssrURL),
 		SSRBundle:      strings.TrimSpace(*ssrBundle),

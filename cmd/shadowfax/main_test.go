@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net"
 	"os"
 	"sync/atomic"
@@ -134,7 +135,7 @@ func TestCSSRebuiltBroadcastsWhenIdle(t *testing.T) {
 	defer broadcaster.Unsubscribe(listener)
 
 	var pending atomic.Bool
-	handleCSSRebuild(broadcaster, false, &pending, false, false)
+	handleCSSRebuild(broadcaster, false, &pending, false, false, io.Discard)
 
 	select {
 	case <-listener:
@@ -150,7 +151,7 @@ func TestCSSRebuiltInertiaSilentWithoutTempl(t *testing.T) {
 	defer broadcaster.Unsubscribe(listener)
 
 	var pending atomic.Bool
-	handleCSSRebuild(broadcaster, true, &pending, false, false)
+	handleCSSRebuild(broadcaster, true, &pending, false, false, io.Discard)
 
 	select {
 	case <-listener:
@@ -166,7 +167,7 @@ func TestCSSRebuiltInertiaBroadcastsOnTempl(t *testing.T) {
 
 	var pending atomic.Bool
 	pending.Store(true)
-	handleCSSRebuild(broadcaster, true, &pending, false, false)
+	handleCSSRebuild(broadcaster, true, &pending, false, false, io.Discard)
 
 	select {
 	case <-listener:
@@ -189,7 +190,7 @@ func TestCSSRebuiltSuppressedDuringRestart(t *testing.T) {
 
 	var pending atomic.Bool
 	pending.Store(true)
-	handleCSSRebuild(broadcaster, false, &pending, true, false)
+	handleCSSRebuild(broadcaster, false, &pending, true, false, io.Discard)
 
 	select {
 	case <-listener:
@@ -244,7 +245,7 @@ func TestFullRestartCycle(t *testing.T) {
 	// Start the CSS rebuild handler (mirrors main.go goroutine)
 	go func() {
 		for range cssRebuilt {
-			handleCSSRebuild(broadcaster, false, &templPending, rebuildInProgress.Load(), false)
+			handleCSSRebuild(broadcaster, false, &templPending, rebuildInProgress.Load(), false, io.Discard)
 		}
 	}()
 

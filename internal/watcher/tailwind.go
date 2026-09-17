@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -16,6 +15,7 @@ import (
 type TailwindConfig struct {
 	Verbose    bool
 	AddProcess func(*exec.Cmd)
+	Log        io.Writer
 }
 
 const tailwindRebuildDebounce = 250 * time.Millisecond
@@ -46,7 +46,7 @@ func RunTailwindWatcher(ctx context.Context, cssRebuilt chan<- struct{}, cfg Tai
 	}
 
 	if err := cmd.Start(); err != nil {
-		fmt.Println("Tailwind CLI not found. Run 'andurel sync' to download it.")
+		logf(cfg.Log, "Tailwind CLI not found. Run 'andurel sync' to download it.\n")
 		return err
 	}
 
@@ -56,8 +56,8 @@ func RunTailwindWatcher(ctx context.Context, cssRebuilt chan<- struct{}, cfg Tai
 
 	// Parse tailwind output to detect rebuilds.
 	var lastRebuildSignal atomic.Int64
-	go scanTailwindOutput(stdout, cfg.Verbose, cssRebuilt, &lastRebuildSignal)
-	go scanTailwindOutput(stderr, cfg.Verbose, cssRebuilt, &lastRebuildSignal)
+	go scanTailwindOutput(stdout, cfg.Verbose, cssRebuilt, &lastRebuildSignal, cfg.Log)
+	go scanTailwindOutput(stderr, cfg.Verbose, cssRebuilt, &lastRebuildSignal, cfg.Log)
 
 	done := make(chan error, 1)
 	go func() {
@@ -83,12 +83,12 @@ func RunTailwindWatcher(ctx context.Context, cssRebuilt chan<- struct{}, cfg Tai
 	}
 }
 
-func scanTailwindOutput(reader io.Reader, verbose bool, cssRebuilt chan<- struct{}, lastRebuildSignal *atomic.Int64) {
+func scanTailwindOutput(reader io.Reader, verbose bool, cssRebuilt chan<- struct{}, lastRebuildSignal *atomic.Int64, log io.Writer) {
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if verbose {
-			fmt.Printf("[tailwind] %s\n", line)
+			logf(log, "[tailwind] %s\n", line)
 		}
 
 		if isTailwindRebuildDoneLine(line) && shouldEmitTailwindRebuild(lastRebuildSignal, tailwindRebuildDebounce) {

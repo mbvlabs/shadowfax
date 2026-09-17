@@ -27,3 +27,20 @@ func (r *Runner) Go(parent context.Context, fn func(ctx context.Context)) {
 
 	go fn(ctx)
 }
+
+// Fanout copies each signal from src to every dest without blocking producers.
+func Fanout(ctx context.Context, src <-chan struct{}, dests ...chan<- struct{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-src:
+			for _, dest := range dests {
+				select {
+				case dest <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}
+}

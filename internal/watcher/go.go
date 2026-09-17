@@ -2,7 +2,7 @@ package watcher
 
 import (
 	"context"
-	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +16,7 @@ var excludeDirs = map[string]bool{
 	".git": true, "assets": true, "vendor": true,
 }
 
-func RunGoWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbose bool) error {
+func RunGoWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbose bool, log io.Writer) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
@@ -50,7 +50,7 @@ func RunGoWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbose bool
 						continue
 					}
 					if err := addWatchRecursive(watcher, event.Name); err != nil && verbose {
-						fmt.Printf("[shadowfax] failed to watch directory %s: %v\n", event.Name, err)
+						logf(log, "[shadowfax] failed to watch directory %s: %v\n", event.Name, err)
 					}
 					continue
 				}
@@ -68,7 +68,7 @@ func RunGoWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbose bool
 				debounceTimer.Stop()
 			}
 			debounceTimer = time.AfterFunc(debounceDelay, func() {
-				fmt.Printf("[shadowfax] Go file changed: %s\n", filepath.Base(event.Name))
+				logf(log, "[shadowfax] Go file changed: %s\n", filepath.Base(event.Name))
 				select {
 				case rebuildChan <- struct{}{}:
 				default:
@@ -79,7 +79,7 @@ func RunGoWatcher(ctx context.Context, rebuildChan chan<- struct{}, verbose bool
 				return nil
 			}
 			if verbose {
-				fmt.Printf("[shadowfax] watcher error: %v\n", err)
+				logf(log, "[shadowfax] watcher error: %v\n", err)
 			}
 		}
 	}

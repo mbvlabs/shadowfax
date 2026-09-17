@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -17,10 +18,13 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/mbvlabs/shadowfax/internal/config"
+	"github.com/mbvlabs/shadowfax/internal/ctxrun"
 	"github.com/mbvlabs/shadowfax/internal/proxy"
+	"github.com/mbvlabs/shadowfax/internal/queue"
 	"github.com/mbvlabs/shadowfax/internal/reload"
 	"github.com/mbvlabs/shadowfax/internal/server"
 	"github.com/mbvlabs/shadowfax/internal/state"
+	"github.com/mbvlabs/shadowfax/internal/tui"
 	"github.com/mbvlabs/shadowfax/internal/watcher"
 )
 
@@ -37,14 +41,6 @@ var (
 )
 
 var verbose = os.Getenv("SHADOWFAX_VERBOSE") == "true"
-
-var clearLogs func()
-
-func init() {
-	if os.Getenv("SHADOWFAX_CLEAR_LOGS") != "" {
-		clearLogs = func() { fmt.Print("\033[2J\033[H") }
-	}
-}
 
 func main() {
 	// Handle --version flag
@@ -69,7 +65,26 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Warning: could not load .env file: %v\n", err)
 	}
 
-	fmt.Printf("Starting shadowfax (version %s)\n", Version)
+	if err := queue.RequireEntrypoint(); err != nil {
+		fmt.Fprintf(os.Stderr, "shadowfax: %v\n", err)
+		os.Exit(1)
+	}
+
+	hub := tui.NewHub()
+	useTUI := tui.UseTUI(runOpts.Inline, os.Stdin, os.Stdout)
+	buildLog := hub.Writer(tui.StreamBuild)
+	appLog := hub.Writer(tui.StreamApp)
+	queueLog := hub.Writer(tui.StreamQueue)
+	if !useTUI {
+		hub.SetFallback(os.Stdout)
+	}
+
+	var clearLogs func()
+	if !useTUI && os.Getenv("SHADOWFAX_CLEAR_LOGS") != "" {
+		clearLogs = func() { fmt.Fprint(os.Stdout, "\033[2J\033[H") }
+	}
+
+	fmt.Fprintf(buildLog, "Starting shadowfax (version %s)\n", Version)
 
 	proxyPort := os.Getenv("PROXY_PORT")
 	if proxyPort == "" {
@@ -82,6 +97,8 @@ func main() {
 
 	broadcaster := reload.NewBroadcaster()
 	rebuildChan := make(chan struct{}, 1)
+	appRebuild := make(chan struct{}, 1)
+	queueRebuild := make(chan struct{}, 1)
 	templChange := make(chan watcher.TemplChange, 64)
 
 	sigChan := make(chan os.Signal, 1)
@@ -99,6 +116,8 @@ func main() {
 		return rebuildInProgress.Load()
 	}
 
+	go ctxrun.Fanout(ctx, rebuildChan, appRebuild, queueRebuild)
+
 	// Start proxy server
 	wg.Go(func() {
 		if err := runProxyServer(ctx, proxyPort, appPort, broadcaster, reloadBlocked); err != nil {
@@ -108,7 +127,7 @@ func main() {
 
 	// Start Go file watcher
 	wg.Go(func() {
-		if err := watcher.RunGoWatcher(ctx, rebuildChan, verbose); err != nil {
+		if err := watcher.RunGoWatcher(ctx, rebuildChan, verbose, buildLog); err != nil {
 			errChan <- fmt.Errorf("go-watcher: %w", err)
 		}
 	})
@@ -118,8 +137,12 @@ func main() {
 		cfg := watcher.TemplWatcherConfig{
 			Verbose:    verbose,
 			AddProcess: addProcess,
+			Log:        buildLog,
 			OnTemplErr: func(msg string) {
 				trk.SetError(state.IndexTempl, msg)
+				if msg != "" {
+					hub.SetStatus(tui.StreamBuild, tui.StatusError)
+				}
 			},
 		}
 		if err := watcher.RunTemplWatcher(ctx, templChange, cfg); err != nil {
@@ -129,7 +152,7 @@ func main() {
 
 	useTailwind, err := config.ShouldUseTailwind()
 	if err != nil && verbose {
-		fmt.Printf("[shadowfax] Tailwind detection error: %v\n", err)
+		fmt.Fprintf(buildLog, "[shadowfax] Tailwind detection error: %v\n", err)
 	}
 	// Always compile assets/css/style.css for Templ pages. Inertia JS still
 	// uses @tailwindcss/vite; broadcasts are gated so Vite HMR is left alone.
@@ -146,6 +169,7 @@ func main() {
 			cfg := watcher.TailwindConfig{
 				Verbose:    verbose,
 				AddProcess: addProcess,
+				Log:        buildLog,
 			}
 			if err := watcher.RunTailwindWatcher(ctx, cssRebuilt, cfg); err != nil {
 				errChan <- fmt.Errorf("live-tailwind: %w", err)
@@ -159,23 +183,24 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-cssRebuilt:
-					handleCSSRebuild(broadcaster, useInertia, &templPendingCSSReload, reloadBlocked(), verbose)
+					handleCSSRebuild(broadcaster, useInertia, &templPendingCSSReload, reloadBlocked(), verbose, buildLog)
 				}
 			}
 		}()
 	} else if verbose {
-		fmt.Println("[shadowfax] Tailwind watcher disabled")
+		fmt.Fprintln(buildLog, "[shadowfax] Tailwind watcher disabled")
 	}
 
 	if useInertia {
-		fmt.Printf("[shadowfax] Starting %s run dev (Inertia frontend)\n", jsRuntime)
+		fmt.Fprintf(buildLog, "[shadowfax] Starting %s run dev (Inertia frontend)\n", jsRuntime)
 		wg.Go(func() {
-			if err := runJsDev(ctx, jsRuntime); err != nil {
-				errChan <- fmt.Errorf("%s-run-dev: %w", jsRuntime, err)
+			if err := runJsDev(ctx, jsRuntime, buildLog); err != nil {
+				fmt.Fprintf(buildLog, "[shadowfax] %s run dev: %v\n", jsRuntime, err)
+				<-ctx.Done()
 			}
 		})
 	} else if verbose {
-		fmt.Println("[shadowfax] Inertia frontend disabled")
+		fmt.Fprintln(buildLog, "[shadowfax] Inertia frontend disabled")
 	}
 
 	readyChan := make(chan struct{}, 1)
@@ -200,13 +225,50 @@ func main() {
 		ReadyChan:    readyChan,
 		StateTracker: trk,
 		ClearLogs:    clearLogs,
+		Stdout:       appLog,
+		Stderr:       appLog,
+		BuildOut:     buildLog,
+		Log:          appLog,
+		OnStatus: func(status string) {
+			switch status {
+			case "starting":
+				hub.SetStatus(tui.StreamApp, tui.StatusStarting)
+			case "ready":
+				hub.SetStatus(tui.StreamApp, tui.StatusReady)
+			case "error":
+				hub.SetStatus(tui.StreamApp, tui.StatusError)
+			}
+		},
 		OnRebuildStateChanged: func(inProgress bool) {
 			rebuildInProgress.Store(inProgress)
+			if inProgress {
+				hub.SetStatus(tui.StreamBuild, tui.StatusStarting)
+			} else if !trk.HasErrorAt(state.IndexGoBuild) && !trk.HasErrorAt(state.IndexTempl) {
+				hub.SetStatus(tui.StreamBuild, tui.StatusReady)
+			}
 		},
 	})
 	wg.Go(func() {
-		if err := appServer.Run(ctx, rebuildChan); err != nil {
+		if err := appServer.Run(ctx, appRebuild); err != nil {
 			errChan <- fmt.Errorf("app-server: %w", err)
+		}
+	})
+
+	queueRunner := queue.NewRunner()
+	queueRunner.AddProcess = addProcess
+	queueRunner.BuildOut = buildLog
+	queueRunner.RuntimeOut = queueLog
+	queueRunner.Log = queueLog
+	queueRunner.OnStatus = func(status tui.Status) {
+		hub.SetStatus(tui.StreamQueue, status)
+		if status == tui.StatusError {
+			hub.SetStatus(tui.StreamBuild, tui.StatusError)
+		}
+	}
+	wg.Go(func() {
+		if err := queueRunner.Run(ctx, queueRebuild); err != nil {
+			fmt.Fprintf(queueLog, "[shadowfax] queue runner: %v\n", err)
+			<-ctx.Done()
 		}
 	})
 
@@ -223,31 +285,32 @@ func main() {
 						clearLogs()
 					}
 					if trk.HasErrorAt(state.IndexTempl) {
-						fmt.Println("[shadowfax] Templ has errors, skipping browser reload")
+						fmt.Fprintln(buildLog, "[shadowfax] Templ has errors, skipping browser reload")
 						continue
 					}
 					if useTailwindCLI {
-						fmt.Println("[shadowfax] Template changed, triggering CSS rebuild")
+						fmt.Fprintln(buildLog, "[shadowfax] Template changed, triggering CSS rebuild")
 						templPendingCSSReload.Store(true)
 						if err := touchFile("./css/base.css"); err != nil {
-							fmt.Printf("[shadowfax] Warning: could not touch CSS file: %v\n", err)
+							fmt.Fprintf(buildLog, "[shadowfax] Warning: could not touch CSS file: %v\n", err)
 							templPendingCSSReload.Store(false)
+							// Fall back to broadcasting directly
 							broadcaster.Broadcast()
 						}
 					} else {
-						fmt.Println("[shadowfax] Template changed, reloading browser")
+						fmt.Fprintln(buildLog, "[shadowfax] Template changed, reloading browser")
 						broadcaster.Broadcast()
 					}
 				case watcher.TemplChangeNeedsRestart:
 					if trk.HasErrorAt(state.IndexTempl) {
-						fmt.Println("[shadowfax] Templ has errors, skipping rebuild")
+						fmt.Fprintln(buildLog, "[shadowfax] Templ has errors, skipping rebuild")
 						continue
 					}
-					fmt.Println("[shadowfax] Template Go code changed, rebuilding")
+					fmt.Fprintln(buildLog, "[shadowfax] Template Go code changed, rebuilding")
 					if useTailwindCLI {
 						rebuildInProgress.Store(true)
 						if err := touchFile("./css/base.css"); err != nil && verbose {
-							fmt.Printf("[shadowfax] Warning: could not touch CSS file: %v\n", err)
+							fmt.Fprintf(buildLog, "[shadowfax] Warning: could not touch CSS file: %v\n", err)
 						}
 					}
 					select {
@@ -259,28 +322,39 @@ func main() {
 		}
 	}()
 
-	fmt.Printf("\n  Proxy server: http://localhost:%s\n", proxyPort)
-	fmt.Printf("  App server:   http://localhost:%s (internal)\n", appPort)
-	fmt.Printf("  TEMPL_DEV_MODE: enabled (fast template reloads)\n")
+	fmt.Fprintf(buildLog, "\n  Proxy server: http://localhost:%s\n", proxyPort)
+	fmt.Fprintf(buildLog, "  App server:   http://localhost:%s (internal)\n", appPort)
+	fmt.Fprintf(buildLog, "  TEMPL_DEV_MODE: enabled (fast template reloads)\n")
 	if useInertia {
-		fmt.Printf("  Inertia frontend: %s run dev (Vite dev server)\n", jsRuntime)
-		fmt.Printf("  Inertia SSR:      Vite /__inertia_ssr\n")
+		fmt.Fprintf(buildLog, "  Inertia frontend: %s run dev (Vite dev server)\n", jsRuntime)
+		fmt.Fprintf(buildLog, "  Inertia SSR:      Vite /__inertia_ssr\n")
 	}
-	fmt.Println()
+	fmt.Fprintln(buildLog)
 
 	go func() {
 		select {
 		case sig := <-sigChan:
-			fmt.Printf("\nReceived signal: %v\n", sig)
+			fmt.Fprintf(buildLog, "\nReceived signal: %v\n", sig)
 			cancel()
 		case err := <-errChan:
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				fmt.Fprintf(os.Stderr, "Shutting down all processes...\n")
+				fmt.Fprintf(buildLog, "Error: %v\n", err)
+				fmt.Fprintf(buildLog, "Shutting down all processes...\n")
 				cancel()
 			}
 		}
 	}()
+
+	if useTUI {
+		header := tui.Header{
+			Version:  Version,
+			ProxyURL: fmt.Sprintf("http://localhost:%s", proxyPort),
+		}
+		if err := tui.Run(ctx, hub, header); err != nil {
+			fmt.Fprintf(os.Stderr, "tui: %v\n", err)
+		}
+		cancel()
+	}
 
 	wg.Wait()
 	close(errChan)
@@ -291,6 +365,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			hasErrors = true
 		}
+	}
+
+	if useTUI {
+		hub.Dump(os.Stdout)
 	}
 
 	if hasErrors {
@@ -306,7 +384,7 @@ func addProcess(cmd *exec.Cmd) {
 }
 
 func cleanup() {
-	fmt.Printf("\nCleaning up processes...\n")
+	fmt.Fprintf(os.Stderr, "\nCleaning up processes...\n")
 
 	processMutex.Lock()
 	compactRunningProcessesLocked()
@@ -337,7 +415,7 @@ func cleanup() {
 		os.RemoveAll(wd + "/tmp/templ")
 	}
 
-	fmt.Printf("Cleanup complete.\n")
+	fmt.Fprintf(os.Stderr, "Cleanup complete.\n")
 }
 
 func compactRunningProcessesLocked() {
@@ -449,9 +527,13 @@ func handleCSSRebuild(
 	templPending *atomic.Bool,
 	reloadBlocked bool,
 	verbose bool,
+	log io.Writer,
 ) {
+	if log == nil {
+		log = os.Stdout
+	}
 	if shouldBroadcastCSSRebuild(useInertia, templPending, reloadBlocked) {
-		fmt.Println("[shadowfax] CSS rebuilt, broadcasting reload")
+		fmt.Fprintln(log, "[shadowfax] CSS rebuilt, broadcasting reload")
 		broadcaster.Broadcast()
 		return
 	}
@@ -459,13 +541,16 @@ func handleCSSRebuild(
 		return
 	}
 	if reloadBlocked {
-		fmt.Println("[shadowfax] CSS rebuilt (server restart in progress, skipping broadcast)")
+		fmt.Fprintln(log, "[shadowfax] CSS rebuilt (server restart in progress, skipping broadcast)")
 		return
 	}
-	fmt.Println("[shadowfax] CSS rebuilt (Inertia, skipping broadcast)")
+	fmt.Fprintln(log, "[shadowfax] CSS rebuilt (Inertia, skipping broadcast)")
 }
 
-func runJsDev(ctx context.Context, runtime string) error {
+func runJsDev(ctx context.Context, runtime string, out io.Writer) error {
+	if out == nil {
+		out = os.Stdout
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -474,8 +559,8 @@ func runJsDev(ctx context.Context, runtime string) error {
 	cmd := exec.CommandContext(ctx, runtime, "run", "dev")
 	cmd.Dir = wd
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = out
+	cmd.Stderr = out
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting %s run dev: %w", runtime, err)
@@ -492,9 +577,11 @@ func runJsDev(ctx context.Context, runtime string) error {
 	case <-ctx.Done():
 		return nil
 	case err := <-done:
-		if err != nil && ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return nil
 		}
-		return err
+		fmt.Fprintf(out, "[shadowfax] %s run dev exited: %v\n", runtime, err)
+		<-ctx.Done()
+		return nil
 	}
 }
