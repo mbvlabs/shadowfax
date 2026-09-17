@@ -75,15 +75,20 @@ Production still uses `cmd/ssr` and `vite build --ssr`. Pages opt in with
 
 ### Tailwind CSS
 
-Tailwind CLI watching is enabled when the project has a `css/base.css` file and
-`--inertia` is not set. Inertia apps use `@tailwindcss/vite` instead.
+Tailwind CLI watching is enabled whenever the project has a `css/base.css` file,
+including `--inertia` apps. The CLI writes `assets/css/style.css` for Templ
+pages (welcome, errors, generated resources).
+
+Inertia JS still gets CSS from Vite (`@tailwindcss/vite`). Shadowfax only
+full-reloads the tab on a CSS rebuild when a Templ change triggered it, so Vite
+HMR is left alone for JS edits.
 
 ## How It Works
 
 1. **Go Watcher** - Monitors `.go` files (excluding `_templ.go`) and triggers a rebuild when changes are detected
 2. **Templ Watcher** - Runs `templ generate --watch` to handle template changes
-3. **Tailwind Watcher** - Runs the Tailwind CLI in watch mode (Templ projects)
-4. **Inertia** - With `--inertia`, runs Vite; CSS and JS HMR stay on Vite
+3. **Tailwind Watcher** - Runs the Tailwind CLI in watch mode whenever `css/base.css` exists
+4. **Inertia** - With `--inertia`, runs Vite; JS/CSS HMR stay on Vite. Templ-triggered CSS rebuilds still full-reload so Templ pages pick up new utilities
 5. **App Server** - Builds and runs `cmd/app/main.go`, restarting on rebuilds
 6. **Queue worker** - Builds and runs `cmd/queue/main.go` on the same Go rebuild signal (missing entrypoint is a startup error)
 7. **Proxy Server** - Intercepts HTML responses and injects a WebSocket client script

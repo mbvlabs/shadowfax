@@ -154,9 +154,10 @@ func main() {
 	if err != nil && verbose {
 		fmt.Fprintf(buildLog, "[shadowfax] Tailwind detection error: %v\n", err)
 	}
-	// Inertia apps use @tailwindcss/vite; the CLI watcher would full-reload
-	// the tab and fight Vite HMR.
-	useTailwindCLI := useTailwind && !useInertia
+	// Always compile assets/css/style.css for Templ pages. Inertia JS still
+	// uses @tailwindcss/vite; broadcasts are gated so Vite HMR is left alone.
+	useTailwindCLI := useTailwind
+	var templPendingCSSReload atomic.Bool
 
 	var cssRebuilt chan struct{}
 
@@ -182,12 +183,7 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-cssRebuilt:
-					if !reloadBlocked() {
-						fmt.Fprintln(buildLog, "[shadowfax] CSS rebuilt, broadcasting reload")
-						broadcaster.Broadcast()
-					} else if verbose {
-						fmt.Fprintln(buildLog, "[shadowfax] CSS rebuilt (server restart in progress, skipping broadcast)")
-					}
+					handleCSSRebuild(broadcaster, useInertia, &templPendingCSSReload, reloadBlocked(), verbose, buildLog)
 				}
 			}
 		}()
@@ -294,8 +290,10 @@ func main() {
 					}
 					if useTailwindCLI {
 						fmt.Fprintln(buildLog, "[shadowfax] Template changed, triggering CSS rebuild")
+						templPendingCSSReload.Store(true)
 						if err := touchFile("./css/base.css"); err != nil {
 							fmt.Fprintf(buildLog, "[shadowfax] Warning: could not touch CSS file: %v\n", err)
+							templPendingCSSReload.Store(false)
 							// Fall back to broadcasting directly
 							broadcaster.Broadcast()
 						}
@@ -510,6 +508,43 @@ func runProxyServer(
 func touchFile(path string) error {
 	now := time.Now()
 	return os.Chtimes(path, now, now)
+}
+
+// shouldBroadcastCSSRebuild decides whether a Tailwind CLI rebuild should
+// full-reload the tab. Swap the pending-Templ flag first so a blocked or
+// Inertia JS-driven rebuild cannot leak into a later event.
+func shouldBroadcastCSSRebuild(useInertia bool, templTriggered *atomic.Bool, reloadBlocked bool) bool {
+	triggered := templTriggered.Swap(false)
+	if reloadBlocked {
+		return false
+	}
+	return !useInertia || triggered
+}
+
+func handleCSSRebuild(
+	broadcaster *reload.Broadcaster,
+	useInertia bool,
+	templPending *atomic.Bool,
+	reloadBlocked bool,
+	verbose bool,
+	log io.Writer,
+) {
+	if log == nil {
+		log = os.Stdout
+	}
+	if shouldBroadcastCSSRebuild(useInertia, templPending, reloadBlocked) {
+		fmt.Fprintln(log, "[shadowfax] CSS rebuilt, broadcasting reload")
+		broadcaster.Broadcast()
+		return
+	}
+	if !verbose {
+		return
+	}
+	if reloadBlocked {
+		fmt.Fprintln(log, "[shadowfax] CSS rebuilt (server restart in progress, skipping broadcast)")
+		return
+	}
+	fmt.Fprintln(log, "[shadowfax] CSS rebuilt (Inertia, skipping broadcast)")
 }
 
 func runJsDev(ctx context.Context, runtime string, out io.Writer) error {
