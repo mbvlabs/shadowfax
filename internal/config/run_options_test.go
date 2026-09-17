@@ -13,6 +13,9 @@ func TestParseRunOptionsDefaults(t *testing.T) {
 	if opts.Inertia {
 		t.Fatal("expected inertia false by default")
 	}
+	if opts.Inline {
+		t.Fatal("expected inline false by default")
+	}
 	if opts.PackageManager != defaultPackageManager {
 		t.Fatalf("PackageManager = %q", opts.PackageManager)
 	}
@@ -36,6 +39,16 @@ func TestParseRunOptionsInertiaFlags(t *testing.T) {
 	}
 	if opts.PackageManager != "pnpm" || opts.SSRPort != "13715" || opts.SSRBundle != "custom/ssr.js" {
 		t.Fatalf("%#v", opts)
+	}
+}
+
+func TestParseRunOptionsInline(t *testing.T) {
+	opts, err := ParseRunOptions([]string{"--inline"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.Inline {
+		t.Fatal("expected inline")
 	}
 }
 

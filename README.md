@@ -9,6 +9,8 @@ The development server and hot-reload runner for the [Andurel](https://github.co
 - **Tailwind CSS** - Optional Tailwind CSS watcher that rebuilds and reloads on style changes
 - **Reverse Proxy** - Proxies requests to your app server and injects the hot-reload script into HTML responses
 - **Inertia** - When `--inertia` is passed (by `andurel run`), runs the Vite dev server. Development SSR is Vite's `/__inertia_ssr` endpoint; `cmd/ssr` is production-only.
+- **Queue worker** - Always builds and runs `cmd/queue` alongside `cmd/app`
+- **Runner TUI** - On a TTY, `andurel run` opens a Bubble Tea dashboard with **app**, **queue**, and **build** tabs
 
 ## Installation
 
@@ -29,7 +31,16 @@ shadowfax \
   --js-package-manager pnpm
 ```
 
-Without `--inertia`, Shadowfax still runs the proxy, Go rebuild loop, and Templ watcher.
+Without `--inertia`, Shadowfax still runs the proxy, Go rebuild loop, Templ watcher, and `cmd/queue`.
+
+On an interactive terminal the runner uses the alternate screen:
+
+- Tabs: **app** (HTTP/`cmd/app`), **queue** (`cmd/queue`), **build** (`go build`, templ, Tailwind, Vite)
+- Click a tab, or press `1` / `2` / `3`, Tab, or arrow keys
+- Scroll with arrows, page up/down, or the mouse wheel
+- `q` or Ctrl+C quits, then dumps buffered logs to the real terminal
+
+Pass `--inline` (or pipe stdout) to keep interleaved prefixed logs and skip the TUI.
 
 Open your browser to `http://localhost:3000` to see your app with hot-reload enabled.
 
@@ -43,6 +54,7 @@ Open your browser to `http://localhost:3000` to see your app with hot-reload ena
 | `--js-package-manager` | `npm` | Package manager for `run dev` |
 | `--ssr-url` | `http://127.0.0.1:13714` | Unused in development (kept for compatibility) |
 | `--ssr-bundle` | `assets/dist/ssr/ssr.js` | Unused in development (kept for compatibility) |
+| `--inline` | `false` | Print interleaved logs instead of the interactive TUI |
 
 Shadowfax does **not** parse `andurel.lock` or `config/inertia.go`. Pass `--inertia` and the package manager explicitly. Production `cmd/ssr` settings live in the app's `config/inertia.go`.
 
@@ -73,8 +85,9 @@ Tailwind CLI watching is enabled when the project has a `css/base.css` file and
 3. **Tailwind Watcher** - Runs the Tailwind CLI in watch mode (Templ projects)
 4. **Inertia** - With `--inertia`, runs Vite; CSS and JS HMR stay on Vite
 5. **App Server** - Builds and runs `cmd/app/main.go`, restarting on rebuilds
-6. **Proxy Server** - Intercepts HTML responses and injects a WebSocket client script
-7. **Broadcaster** - Notifies all connected browsers to reload when changes are ready
+6. **Queue worker** - Builds and runs `cmd/queue/main.go` on the same Go rebuild signal (missing entrypoint is a startup error)
+7. **Proxy Server** - Intercepts HTML responses and injects a WebSocket client script
+8. **Broadcaster** - Notifies all connected browsers to reload when changes are ready
 
 ## Project Structure
 
@@ -85,8 +98,10 @@ internal/
   proxy/             # Reverse proxy with script injection
   reload/            # Broadcaster, health checks, WebSocket handler
   server/            # App server lifecycle management
-  watcher/           # File watchers (Go, templ, Tailwind, Inertia SSR sources)
-  ssr/               # Builds and supervises cmd/ssr in development
+  queue/             # Builds and supervises cmd/queue
+  tui/               # Log hub and Bubble Tea runner UI
+  watcher/           # File watchers (Go, templ, Tailwind)
+  ssr/               # cmd/ssr helpers kept for production-oriented tests
 ```
 
 ## Contributing
