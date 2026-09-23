@@ -67,6 +67,10 @@ func waitHub(ch <-chan Line) tea.Cmd {
 	}
 }
 
+func (m model) streams() []string {
+	return m.hub.StreamNames()
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -93,39 +97,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.follow = m.vp.AtBottom()
 		return m, nil
 	case tea.KeyPressMsg:
-		switch msg.String() {
+		key := msg.String()
+		switch key {
 		case "q", "ctrl+c":
 			if m.unsub != nil {
 				m.unsub()
 				m.unsub = nil
 			}
 			return m, tea.Quit
-		case "1":
-			m.tab = 0
-			m.follow = true
-			m.refreshViewport()
-			return m, nil
-		case "2":
-			m.tab = 1
-			m.follow = true
-			m.refreshViewport()
-			return m, nil
-		case "3":
-			m.tab = 2
-			m.follow = true
-			m.refreshViewport()
-			return m, nil
 		case "tab", "right":
-			m.tab = (m.tab + 1) % len(Streams)
+			streams := m.streams()
+			if len(streams) > 0 {
+				m.tab = (m.tab + 1) % len(streams)
+			}
 			m.follow = true
 			m.refreshViewport()
 			return m, nil
 		case "left", "shift+tab":
-			m.tab = (m.tab + len(Streams) - 1) % len(Streams)
+			streams := m.streams()
+			if len(streams) > 0 {
+				m.tab = (m.tab + len(streams) - 1) % len(streams)
+			}
 			m.follow = true
 			m.refreshViewport()
 			return m, nil
 		default:
+			if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
+				idx := int(key[0] - '1')
+				streams := m.streams()
+				if idx < len(streams) {
+					m.tab = idx
+					m.follow = true
+					m.refreshViewport()
+					return m, nil
+				}
+			}
 			m.vp, _ = m.vp.Update(msg)
 			m.follow = m.vp.AtBottom()
 			return m, nil
@@ -139,7 +145,7 @@ func (m *model) hitTab(x, y int) bool {
 		return false
 	}
 	cursor := 0
-	for i, name := range Streams {
+	for i, name := range m.streams() {
 		label := tabLabel(name, m.hub.Status(name), i == m.tab)
 		w := lipgloss.Width(label) + 1
 		if x >= cursor && x < cursor+w {
@@ -169,8 +175,15 @@ func (m *model) refreshViewport() {
 	if !m.ready {
 		return
 	}
+	streams := m.streams()
+	if len(streams) == 0 {
+		return
+	}
+	if m.tab >= len(streams) {
+		m.tab = len(streams) - 1
+	}
 	atBottom := m.vp.AtBottom()
-	content := HighlightLines(m.hub.Lines(Streams[m.tab]))
+	content := HighlightLines(m.hub.Lines(streams[m.tab]))
 	m.vp.SetContent(content)
 	if m.follow || atBottom {
 		m.vp.GotoBottom()
@@ -192,12 +205,21 @@ func (m model) render() string {
 	header := fmt.Sprintf("shadowfax %s  %s", m.header.Version, m.header.ProxyURL)
 	header = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")).Render(header)
 
+	streams := m.streams()
 	var tabs []string
-	for i, name := range Streams {
+	for i, name := range streams {
 		tabs = append(tabs, tabLabel(name, m.hub.Status(name), i == m.tab))
 	}
 	tabBar := strings.Join(tabs, " ")
-	footer := lipgloss.NewStyle().Faint(true).Render("click tab · 1/2/3 · ←/→ · ↑↓ scroll · q quit")
+	footerHint := "1/2/3"
+	if n := len(streams); n > 3 {
+		footerHint = fmt.Sprintf("1–%d", min(9, n))
+	} else if n > 0 && n < 3 {
+		footerHint = fmt.Sprintf("1–%d", n)
+	}
+	footer := lipgloss.NewStyle().Faint(true).Render(
+		fmt.Sprintf("click tab · %s · ←/→ · ↑↓ scroll · q quit", footerHint),
+	)
 	return lipgloss.JoinVertical(lipgloss.Left, header, tabBar, m.vp.View(), footer)
 }
 
@@ -219,6 +241,8 @@ func tabColor(name string) color.Color {
 		return lipgloss.Color("10")
 	case StreamQueue:
 		return lipgloss.Color("13")
+	case "mailpit":
+		return lipgloss.Color("214") // warm amber, matches plan mock
 	default:
 		return lipgloss.Color("11")
 	}
