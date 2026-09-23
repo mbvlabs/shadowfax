@@ -19,6 +19,7 @@ import (
 
 	"github.com/mbvlabs/shadowfax/internal/config"
 	"github.com/mbvlabs/shadowfax/internal/ctxrun"
+	"github.com/mbvlabs/shadowfax/internal/proc"
 	"github.com/mbvlabs/shadowfax/internal/proxy"
 	"github.com/mbvlabs/shadowfax/internal/queue"
 	"github.com/mbvlabs/shadowfax/internal/reload"
@@ -38,6 +39,7 @@ const (
 var (
 	runningProcesses []*exec.Cmd
 	processMutex     sync.Mutex
+	cleanupPorts     []string
 )
 
 var verbose = os.Getenv("SHADOWFAX_VERBOSE") == "true"
@@ -93,6 +95,10 @@ func main() {
 	appPort := os.Getenv("PORT")
 	if appPort == "" {
 		appPort = DefaultAppPort
+	}
+	cleanupPorts = []string{
+		net.JoinHostPort("127.0.0.1", proxyPort),
+		net.JoinHostPort("127.0.0.1", appPort),
 	}
 
 	broadcaster := reload.NewBroadcaster()
@@ -393,19 +399,40 @@ func cleanup() {
 	runningProcesses = nil
 	processMutex.Unlock()
 
-	// Ask tracked child processes to stop first.
+	// Ask tracked child processes to stop first (process group when Setpgid).
 	for _, cmd := range processes {
 		signalTrackedProcess(cmd, syscall.SIGTERM)
 	}
 
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !anyProcessAlive(processes) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	// Fallback to force kill only tracked child processes that are still alive.
-	time.Sleep(500 * time.Millisecond)
 	for _, cmd := range processes {
 		if cmd == nil || cmd.Process == nil {
 			continue
 		}
 		if processAlive(cmd.Process) {
 			signalTrackedProcess(cmd, syscall.SIGKILL)
+		}
+	}
+
+	killDeadline := time.Now().Add(time.Second)
+	for time.Now().Before(killDeadline) {
+		if !anyProcessAlive(processes) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	for _, addr := range cleanupPorts {
+		if err := proc.WaitForPortRelease(context.Background(), addr, 2*time.Second); err != nil {
+			fmt.Fprintf(os.Stderr, "[shadowfax] %v\n", err)
 		}
 	}
 
@@ -416,6 +443,15 @@ func cleanup() {
 	}
 
 	fmt.Fprintf(os.Stderr, "Cleanup complete.\n")
+}
+
+func anyProcessAlive(processes []*exec.Cmd) bool {
+	for _, cmd := range processes {
+		if cmd != nil && cmd.Process != nil && processAlive(cmd.Process) {
+			return true
+		}
+	}
+	return false
 }
 
 func compactRunningProcessesLocked() {
@@ -452,11 +488,9 @@ func signalTrackedProcess(cmd *exec.Cmd, sig syscall.Signal) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
-	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid && cmd.Process.Pid > 0 {
-		err := syscall.Kill(-cmd.Process.Pid, sig)
-		if err == nil || errors.Is(err, syscall.ESRCH) {
-			return
-		}
+	if proc.HasProcessGroup(cmd) {
+		_ = proc.SignalProcessGroup(cmd, sig)
+		return
 	}
 	_ = cmd.Process.Signal(sig)
 }
@@ -556,11 +590,13 @@ func runJsDev(ctx context.Context, runtime string, out io.Writer) error {
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, runtime, "run", "dev")
+	cmd := exec.Command(runtime, "run", "dev")
 	cmd.Dir = wd
-
 	cmd.Stdout = out
 	cmd.Stderr = out
+	// Own process group so cleanup can SIGKILL Vite (and other grandchildren)
+	// that actually bind the frontend ports — not just the npm/pnpm parent.
+	proc.ConfigureProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting %s run dev: %w", runtime, err)
@@ -575,6 +611,12 @@ func runJsDev(ctx context.Context, runtime string, out io.Writer) error {
 
 	select {
 	case <-ctx.Done():
+		proc.Stop(cmd, proc.StopOptions{
+			Done:      waitDone(done),
+			TermWait:  proc.DefaultTermWait,
+			KillWait:  time.Second,
+			GroupKill: true,
+		})
 		return nil
 	case err := <-done:
 		if ctx.Err() != nil {
@@ -584,4 +626,14 @@ func runJsDev(ctx context.Context, runtime string, out io.Writer) error {
 		<-ctx.Done()
 		return nil
 	}
+}
+
+// waitDone adapts an error channel into a structural done signal for proc.Stop.
+func waitDone(errs <-chan error) <-chan struct{} {
+	ch := make(chan struct{})
+	go func() {
+		<-errs
+		close(ch)
+	}()
+	return ch
 }

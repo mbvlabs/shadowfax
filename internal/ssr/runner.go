@@ -2,7 +2,6 @@ package ssr
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,15 +10,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/mbvlabs/shadowfax/internal/config"
+	"github.com/mbvlabs/shadowfax/internal/proc"
 )
 
 const (
 	defaultStopTimeout        = 3 * time.Second
-	defaultPortReleaseTimeout = 2 * time.Second
+	defaultPortReleaseTimeout = 5 * time.Second
 )
 
 // Runner owns the project's cmd/ssr process during local development.
@@ -54,7 +53,9 @@ func (runner *Runner) Run(ctx context.Context, rebuildChan <-chan struct{}) erro
 	for {
 		select {
 		case <-ctx.Done():
-			runner.stop()
+			if err := runner.stop(); err != nil {
+				runner.logf("[shadowfax] SSR stop error: %v\n", err)
+			}
 			return nil
 		case <-rebuildChan:
 			if runner.Verbose {
@@ -70,7 +71,10 @@ func (runner *Runner) Run(ctx context.Context, rebuildChan <-chan struct{}) erro
 				runner.logf("[shadowfax] SSR restart error: %v\n", err)
 				continue
 			}
-			runner.stop()
+			if err := runner.stop(); err != nil {
+				runner.logf("[shadowfax] SSR stop error: %v\n", err)
+				continue
+			}
 			if err := runner.start(ctx); err != nil {
 				runner.logf("[shadowfax] SSR restart error: %v\n", err)
 			}
@@ -144,7 +148,7 @@ func (runner *Runner) start(ctx context.Context) error {
 	cmd.Stderr = runner.runtimeWriter()
 	// Put cmd/ssr in its own process group so a later kill reaches the Node
 	// child that actually binds the SSR port.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	proc.ConfigureProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
 		runner.mu.Unlock()
@@ -175,7 +179,7 @@ func (runner *Runner) start(ctx context.Context) error {
 	}()
 
 	if err := runner.waitForHealth(ctx, done); err != nil {
-		runner.stop()
+		_ = runner.stop()
 		return err
 	}
 
@@ -231,7 +235,7 @@ func (runner *Runner) waitForHealth(ctx context.Context, done <-chan struct{}) e
 	}
 }
 
-func (runner *Runner) stop() {
+func (runner *Runner) stop() error {
 	runner.setReady(false)
 
 	runner.mu.Lock()
@@ -241,34 +245,16 @@ func (runner *Runner) stop() {
 	runner.done = nil
 	runner.mu.Unlock()
 
-	if cmd == nil || cmd.Process == nil {
-		runner.waitForPortRelease(context.Background())
-		return
+	if cmd != nil && cmd.Process != nil {
+		proc.Stop(cmd, proc.StopOptions{
+			Done:      done,
+			TermWait:  runner.stopWaitTimeout(),
+			KillWait:  time.Second,
+			GroupKill: true,
+		})
 	}
 
-	_ = cmd.Process.Signal(syscall.SIGTERM)
-
-	timer := time.NewTimer(runner.stopWaitTimeout())
-	defer timer.Stop()
-
-	if done != nil {
-		select {
-		case <-done:
-			runner.waitForPortRelease(context.Background())
-			return
-		case <-timer.C:
-		}
-	}
-
-	_ = signalProcessGroup(cmd, syscall.SIGKILL)
-	if done != nil {
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-		}
-	}
-
-	runner.waitForPortRelease(context.Background())
+	return runner.waitForPortRelease(context.Background())
 }
 
 func (runner *Runner) stopWaitTimeout() time.Duration {
@@ -278,28 +264,20 @@ func (runner *Runner) stopWaitTimeout() time.Duration {
 	return defaultStopTimeout
 }
 
-func (runner *Runner) waitForPortRelease(ctx context.Context) {
+func (runner *Runner) waitForPortRelease(ctx context.Context) error {
 	addr, err := listenAddr(runner.Settings.URL)
 	if err != nil {
-		return
+		return nil
 	}
-
-	deadline := time.Now().Add(defaultPortReleaseTimeout)
-	for {
-		ln, err := net.Listen("tcp", addr)
-		if err == nil {
-			_ = ln.Close()
-			return
-		}
-		if time.Now().After(deadline) {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(20 * time.Millisecond):
-		}
+	timeout := defaultPortReleaseTimeout
+	if runner.stopTimeout > 0 && runner.stopTimeout < timeout {
+		// Tests that shrink stopTimeout should also get a snappy port wait.
+		timeout = 2 * time.Second
 	}
+	if err := proc.WaitForPortRelease(ctx, addr, timeout); err != nil {
+		return fmt.Errorf("inertia SSR listen address still busy after stop: %w", err)
+	}
+	return nil
 }
 
 func listenAddr(rawURL string) (string, error) {
@@ -313,23 +291,6 @@ func listenAddr(rawURL string) (string, error) {
 		return "", fmt.Errorf("ssr url %q is missing host or port", rawURL)
 	}
 	return net.JoinHostPort(host, port), nil
-}
-
-func signalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-
-	pid := cmd.Process.Pid
-	if pid <= 0 {
-		return cmd.Process.Signal(sig)
-	}
-
-	err := syscall.Kill(-pid, sig)
-	if err == nil || errors.Is(err, syscall.ESRCH) {
-		return err
-	}
-	return cmd.Process.Signal(sig)
 }
 
 func mustWorkingDir() string {
