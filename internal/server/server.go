@@ -5,16 +5,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/mbvlabs/shadowfax/internal/ctxrun"
+	"github.com/mbvlabs/shadowfax/internal/proc"
 	"github.com/mbvlabs/shadowfax/internal/reload"
 	"github.com/mbvlabs/shadowfax/internal/state"
 )
@@ -45,6 +46,8 @@ type AppServer struct {
 	buildOut               io.Writer
 	log                    io.Writer
 	onStatus               func(string)
+	portWait               time.Duration
+	stopTermWait           time.Duration
 }
 
 type Config struct {
@@ -182,7 +185,12 @@ func (s *AppServer) rebuild(buildCtx context.Context, appCtx context.Context) er
 	}
 
 	previousBinPath := s.binPath
-	s.stopLocked()
+	if err := s.stopLocked(); err != nil {
+		os.Remove(candidateBinPath)
+		s.cmdMu.Unlock()
+		s.logf("[shadowfax] %v\n", err)
+		return err
+	}
 
 	s.logf("[shadowfax] Starting server...\n")
 	cmd := exec.CommandContext(appCtx, candidateBinPath)
@@ -398,23 +406,41 @@ func (s *AppServer) stop() {
 	s.cancelHealthMonitor()
 	s.cmdMu.Lock()
 	defer s.cmdMu.Unlock()
-	s.stopLocked()
+	_ = s.stopLocked()
 }
 
-func (s *AppServer) stopLocked() {
+func (s *AppServer) stopLocked() error {
 	s.cancelHealthMonitor()
 	if s.cmd != nil && s.cmd.Process != nil {
-		s.cmd.Process.Signal(syscall.SIGTERM)
-		done := make(chan error, 1)
-		go func() { done <- s.cmd.Wait() }()
-
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-			s.cmd.Process.Kill()
-		}
+		proc.Stop(s.cmd, proc.StopOptions{
+			TermWait: s.termWait(),
+			KillWait: time.Second,
+		})
 	}
 	s.cmd = nil
+
+	if err := proc.WaitForPortRelease(context.Background(), s.listenAddr(), s.portWaitTimeout()); err != nil {
+		return fmt.Errorf("app listen address still busy after stop: %w", err)
+	}
+	return nil
+}
+
+func (s *AppServer) listenAddr() string {
+	return net.JoinHostPort("127.0.0.1", s.appPort)
+}
+
+func (s *AppServer) portWaitTimeout() time.Duration {
+	if s.portWait > 0 {
+		return s.portWait
+	}
+	return proc.DefaultPortWait
+}
+
+func (s *AppServer) termWait() time.Duration {
+	if s.stopTermWait > 0 {
+		return s.stopTermWait
+	}
+	return proc.DefaultTermWait
 }
 
 func (s *AppServer) startHealthMonitor(ctx context.Context, previousBinPath string) {

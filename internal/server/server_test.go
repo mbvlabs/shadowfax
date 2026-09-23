@@ -3,10 +3,12 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"sync/atomic"
@@ -330,6 +332,104 @@ func TestRepeatedRuntimeMissingFileOutputTriggersRebuild(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not exit after cancel")
 	}
+}
+
+func TestStopLockedFailsWhenPortStaysBusy(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	s := &AppServer{
+		appPort:  port,
+		portWait: 80 * time.Millisecond,
+	}
+
+	err = s.stopLocked()
+	if err == nil {
+		t.Fatal("expected stopLocked to fail while listen port is held")
+	}
+}
+
+func TestStopLockedWaitsForPortAfterKill(t *testing.T) {
+	port := getUnusedPort(t)
+	helper := buildPortHolder(t, port, true)
+	cmd := exec.Command(helper)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait until the port is actually held.
+	deadline := time.Now().Add(2 * time.Second)
+	for procListenAvailable(port) {
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			t.Fatal("port holder never bound")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	s := &AppServer{
+		cmd:          cmd,
+		appPort:      port,
+		portWait:     2 * time.Second,
+		stopTermWait: 80 * time.Millisecond,
+	}
+
+	if err := s.stopLocked(); err != nil {
+		t.Fatalf("stopLocked: %v", err)
+	}
+	if !procListenAvailable(port) {
+		t.Fatal("port should be free after stopLocked")
+	}
+}
+
+func procListenAvailable(port string) bool {
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", port))
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
+}
+
+func buildPortHolder(t *testing.T, port string, ignoreTerm bool) string {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "holder.go")
+	bin := filepath.Join(t.TempDir(), "holder")
+	ignore := "false"
+	if ignoreTerm {
+		ignore = "true"
+	}
+	code := fmt.Sprintf(`package main
+import (
+  "net"
+  "net/http"
+  "os/signal"
+  "syscall"
+)
+func main() {
+  if %s {
+    signal.Ignore(syscall.SIGTERM)
+  }
+  ln, err := net.Listen("tcp", "127.0.0.1:%s")
+  if err != nil { panic(err) }
+  _ = http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(200)
+  }))
+}
+`, ignore, port)
+	if err := os.WriteFile(src, []byte(code), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "build", "-o", bin, src)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("build port holder: %v", err)
+	}
+	return bin
 }
 
 func writeMissingFileEmitter(path string) error {

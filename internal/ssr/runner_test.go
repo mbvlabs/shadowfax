@@ -45,13 +45,15 @@ func TestRunnerRestartReleasesChildPort(t *testing.T) {
 	if err := runner.start(ctx); err != nil {
 		t.Fatalf("first start: %v", err)
 	}
-	t.Cleanup(runner.stop)
+	t.Cleanup(func() { _ = runner.stop() })
 
 	if err := checkHealth(ctx, runner.Settings.URL); err != nil {
 		t.Fatalf("health after first start: %v", err)
 	}
 
-	runner.stop()
+	if err := runner.stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
 
 	if err := runner.start(ctx); err != nil {
 		t.Fatalf("restart after stop: %v", err)
@@ -69,9 +71,11 @@ func TestRunnerStopFreesChildPort(t *testing.T) {
 	if err := runner.start(t.Context()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	t.Cleanup(runner.stop)
+	t.Cleanup(func() { _ = runner.stop() })
 
-	runner.stop()
+	if err := runner.stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
 
 	addr := net.JoinHostPort("127.0.0.1", port)
 	ln, err := net.Listen("tcp", addr)
@@ -95,7 +99,7 @@ func TestRunnerReadyCallbackTracksHealth(t *testing.T) {
 	if err := runner.start(t.Context()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	t.Cleanup(runner.stop)
+	t.Cleanup(func() { _ = runner.stop() })
 
 	mu.Lock()
 	afterStart := append([]bool(nil), states...)
@@ -108,7 +112,9 @@ func TestRunnerReadyCallbackTracksHealth(t *testing.T) {
 		t.Fatalf("health should succeed before ready callback: %v", err)
 	}
 
-	runner.stop()
+	if err := runner.stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
 
 	mu.Lock()
 	afterStop := append([]bool(nil), states...)
@@ -133,9 +139,11 @@ func TestRunnerRestartNotifiesUnreadyThenReady(t *testing.T) {
 	if err := runner.start(ctx); err != nil {
 		t.Fatalf("first start: %v", err)
 	}
-	t.Cleanup(runner.stop)
+	t.Cleanup(func() { _ = runner.stop() })
 
-	runner.stop()
+	if err := runner.stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
 	if err := runner.start(ctx); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
@@ -162,9 +170,11 @@ func TestRunnerKillsChildWhenParentIgnoresSIGTERM(t *testing.T) {
 	if err := runner.start(t.Context()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	t.Cleanup(runner.stop)
+	t.Cleanup(func() { _ = runner.stop() })
 
-	runner.stop()
+	if err := runner.stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
 
 	addr := net.JoinHostPort("127.0.0.1", port)
 	ln, err := net.Listen("tcp", addr)
