@@ -86,3 +86,31 @@ func TestHubStatus(t *testing.T) {
 		t.Fatal("expected ready")
 	}
 }
+
+func TestHubEnableToolStream(t *testing.T) {
+	h := NewHub()
+	names := h.StreamNames()
+	if len(names) != 3 || names[0] != StreamApp {
+		t.Fatalf("core names = %#v", names)
+	}
+
+	h.Enable("mailpit")
+	h.Enable("mailpit") // idempotent
+	names = h.StreamNames()
+	if len(names) != 4 || names[3] != "mailpit" {
+		t.Fatalf("after enable = %#v", names)
+	}
+
+	var fallback bytes.Buffer
+	h.SetFallback(&fallback)
+	_, _ = h.Writer("mailpit").Write([]byte("smtp up\n"))
+	if !strings.Contains(fallback.String(), "[mailpit] smtp up\n") {
+		t.Fatalf("fallback = %q", fallback.String())
+	}
+
+	var dump bytes.Buffer
+	h.Dump(&dump)
+	if !strings.Contains(dump.String(), "--- mailpit ---") {
+		t.Fatalf("dump missing mailpit: %q", dump.String())
+	}
+}

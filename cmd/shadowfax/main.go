@@ -25,6 +25,7 @@ import (
 	"github.com/mbvlabs/shadowfax/internal/reload"
 	"github.com/mbvlabs/shadowfax/internal/server"
 	"github.com/mbvlabs/shadowfax/internal/state"
+	"github.com/mbvlabs/shadowfax/internal/tools"
 	"github.com/mbvlabs/shadowfax/internal/tui"
 	"github.com/mbvlabs/shadowfax/internal/watcher"
 )
@@ -73,6 +74,9 @@ func main() {
 	}
 
 	hub := tui.NewHub()
+	for _, name := range runOpts.Tools {
+		hub.Enable(name)
+	}
 	useTUI := tui.UseTUI(runOpts.Inline, os.Stdin, os.Stdout)
 	buildLog := hub.Writer(tui.StreamBuild)
 	appLog := hub.Writer(tui.StreamApp)
@@ -278,6 +282,23 @@ func main() {
 		}
 	})
 
+	for _, toolName := range runOpts.Tools {
+		name := toolName
+		toolLog := hub.Writer(name)
+		toolRunner := tools.NewRunner(name)
+		toolRunner.AddProcess = addProcess
+		toolRunner.Out = toolLog
+		toolRunner.OnStatus = func(status tui.Status) {
+			hub.SetStatus(name, status)
+		}
+		wg.Go(func() {
+			if err := toolRunner.Run(ctx); err != nil {
+				fmt.Fprintf(toolLog, "[shadowfax] %s runner: %v\n", name, err)
+				<-ctx.Done()
+			}
+		})
+	}
+
 	// Handle templ changes
 	go func() {
 		for {
@@ -334,6 +355,9 @@ func main() {
 	if useInertia {
 		fmt.Fprintf(buildLog, "  Inertia frontend: %s run dev (Vite dev server)\n", jsRuntime)
 		fmt.Fprintf(buildLog, "  Inertia SSR:      Vite /__inertia_ssr\n")
+	}
+	if len(runOpts.Tools) > 0 {
+		fmt.Fprintf(buildLog, "  Sidecar tools:  %s\n", formatToolList(runOpts.Tools))
 	}
 	fmt.Fprintln(buildLog)
 
@@ -626,6 +650,17 @@ func runJsDev(ctx context.Context, runtime string, out io.Writer) error {
 		<-ctx.Done()
 		return nil
 	}
+}
+
+func formatToolList(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	out := names[0]
+	for _, name := range names[1:] {
+		out += ", " + name
+	}
+	return out
 }
 
 // waitDone adapts an error channel into a structural done signal for proc.Stop.

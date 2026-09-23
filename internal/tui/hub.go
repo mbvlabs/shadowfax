@@ -16,7 +16,12 @@ const (
 	maxLines = 5000
 )
 
-var Streams = []string{StreamApp, StreamQueue, StreamBuild}
+// CoreStreams are always present in the runner TUI.
+var CoreStreams = []string{StreamApp, StreamQueue, StreamBuild}
+
+// Streams is the default tab order (core only). Prefer Hub.StreamNames() when
+// tool sidecars may be enabled.
+var Streams = CoreStreams
 
 // Status is the live process indicator shown on each tab.
 type Status int
@@ -53,6 +58,7 @@ type Line struct {
 // Hub fans child-process output into named ring buffers and optional subscribers.
 type Hub struct {
 	mu       sync.Mutex
+	order    []string
 	streams  map[string]*ring
 	status   map[string]Status
 	subs     []chan Line
@@ -63,8 +69,9 @@ type Hub struct {
 
 func NewHub() *Hub {
 	h := &Hub{
-		streams: make(map[string]*ring, len(Streams)),
-		status:  make(map[string]Status, len(Streams)),
+		order:   append([]string(nil), CoreStreams...),
+		streams: make(map[string]*ring, len(CoreStreams)),
+		status:  make(map[string]Status, len(CoreStreams)),
 		prefixes: map[string]string{
 			StreamApp:   "[app] ",
 			StreamQueue: "[queue] ",
@@ -72,11 +79,36 @@ func NewHub() *Hub {
 		},
 		writers: make(map[string]*streamWriter),
 	}
-	for _, name := range Streams {
+	for _, name := range CoreStreams {
 		h.streams[name] = newRing(maxLines)
 		h.status[name] = StatusIdle
 	}
 	return h
+}
+
+// Enable registers an additional named stream (e.g. a sidecar tool tab).
+// Idempotent: enabling an existing stream is a no-op.
+func (h *Hub) Enable(name string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.streams[name]; ok {
+		return
+	}
+	h.streams[name] = newRing(maxLines)
+	h.status[name] = StatusIdle
+	if _, ok := h.prefixes[name]; !ok {
+		h.prefixes[name] = "[" + name + "] "
+	}
+	h.order = append(h.order, name)
+}
+
+// StreamNames returns the live tab order (core + enabled tools).
+func (h *Hub) StreamNames() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, len(h.order))
+	copy(out, h.order)
+	return out
 }
 
 // SetFallback mirrors complete lines (with stream prefixes) to w. Used for --inline / non-TTY.
@@ -150,7 +182,7 @@ func (h *Hub) Subscribe() (<-chan Line, func()) {
 func (h *Hub) Dump(w io.Writer) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, name := range Streams {
+	for _, name := range h.order {
 		r := h.streams[name]
 		if r == nil || r.len() == 0 {
 			continue
@@ -169,6 +201,10 @@ func (h *Hub) appendLine(stream, text string) {
 	if r == nil {
 		r = newRing(maxLines)
 		h.streams[stream] = r
+		if _, ok := h.prefixes[stream]; !ok {
+			h.prefixes[stream] = "[" + stream + "] "
+		}
+		h.order = append(h.order, stream)
 	}
 	r.add(text)
 	line := Line{Stream: stream, Text: text}

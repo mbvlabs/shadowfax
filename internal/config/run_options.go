@@ -15,6 +15,11 @@ const (
 	defaultPackageManager = "npm"
 )
 
+// Allowed sidecar tool names for --tools (v1: mailpit only).
+var allowedTools = map[string]struct{}{
+	"mailpit": {},
+}
+
 // RunOptions is the explicit contract passed by `andurel run`.
 type RunOptions struct {
 	Inertia        bool
@@ -24,6 +29,7 @@ type RunOptions struct {
 	SSRBundle      string
 	SSRHost        string
 	SSRPort        string
+	Tools          []string
 }
 
 // SSRSettings describes health-check and JS-bundle paths for the SSR runner.
@@ -53,6 +59,11 @@ func ParseRunOptions(args []string) (RunOptions, error) {
 		defaultSSRBundle,
 		"path to the built SSR JS bundle (for missing-bundle detection)",
 	)
+	tools := fs.String(
+		"tools",
+		"",
+		"comma-separated sidecar tools to start (mailpit)",
+	)
 
 	if err := fs.Parse(args); err != nil {
 		return RunOptions{}, err
@@ -75,6 +86,12 @@ func ParseRunOptions(args []string) (RunOptions, error) {
 		opts.SSRBundle = defaultSSRBundle
 	}
 
+	parsedTools, err := ParseTools(*tools)
+	if err != nil {
+		return RunOptions{}, err
+	}
+	opts.Tools = parsedTools
+
 	host, port, err := parseSSRURL(opts.SSRURL)
 	if err != nil {
 		return RunOptions{}, err
@@ -82,6 +99,40 @@ func ParseRunOptions(args []string) (RunOptions, error) {
 	opts.SSRHost = host
 	opts.SSRPort = port
 	return opts, nil
+}
+
+// ParseTools validates a comma-separated --tools value.
+// An empty string means the flag was omitted (no tools).
+func ParseTools(raw string) ([]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		if raw != "" {
+			return nil, fmt.Errorf("--tools: empty list")
+		}
+		return nil, nil
+	}
+
+	parts := strings.Split(raw, ",")
+	seen := make(map[string]struct{}, len(parts))
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			return nil, fmt.Errorf("--tools: empty name")
+		}
+		if _, ok := allowedTools[name]; !ok {
+			return nil, fmt.Errorf("--tools: unknown tool %q (allowed: mailpit)", name)
+		}
+		if _, dup := seen[name]; dup {
+			return nil, fmt.Errorf("--tools: duplicate tool %q", name)
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("--tools: empty list")
+	}
+	return out, nil
 }
 
 // SSRSettings converts run options into SSR runner settings.

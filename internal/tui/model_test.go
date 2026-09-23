@@ -46,7 +46,7 @@ func TestTabClickSelectsQueue(t *testing.T) {
 
 	cursor := 0
 	var x int
-	for i, name := range Streams {
+	for i, name := range mod.streams() {
 		label := tabLabel(name, mod.hub.Status(name), i == mod.tab)
 		w := lipgloss.Width(label) + 1
 		if i == 1 {
@@ -60,5 +60,26 @@ func TestTabClickSelectsQueue(t *testing.T) {
 	mod = updated.(model)
 	if mod.tab != 1 {
 		t.Fatalf("tab = %d, want 1 (clicked x=%d)", mod.tab, x)
+	}
+}
+
+func TestModelToolTabDigitAndFooter(t *testing.T) {
+	hub := NewHub()
+	hub.Enable("mailpit")
+	_, _ = hub.Writer("mailpit").Write([]byte("smtp ready\n"))
+
+	m := newModel(hub, Header{Version: "test", ProxyURL: "http://localhost:3000"})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	mod := updated.(model)
+	view := mod.render()
+	if !strings.Contains(view, "mailpit") || !strings.Contains(view, "1–4") {
+		t.Fatalf("expected mailpit tab and 1–4 footer, got %q", view)
+	}
+
+	updated, _ = mod.Update(tea.KeyPressMsg{Text: "4", Code: '4'})
+	mod = updated.(model)
+	view = mod.render()
+	if !strings.Contains(view, "smtp ready") {
+		t.Fatalf("expected mailpit logs after key 4, got %q", view)
 	}
 }

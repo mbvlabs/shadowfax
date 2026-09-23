@@ -58,3 +58,47 @@ func TestParseRunOptionsInvalidURL(t *testing.T) {
 		t.Fatalf("expected --ssr-url error, got %v", err)
 	}
 }
+
+func TestParseRunOptionsTools(t *testing.T) {
+	opts, err := ParseRunOptions([]string{"--tools", "mailpit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opts.Tools) != 1 || opts.Tools[0] != "mailpit" {
+		t.Fatalf("Tools = %#v", opts.Tools)
+	}
+
+	opts, err = ParseRunOptions([]string{"--tools", " mailpit "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opts.Tools) != 1 || opts.Tools[0] != "mailpit" {
+		t.Fatalf("trimmed Tools = %#v", opts.Tools)
+	}
+}
+
+func TestParseToolsRejects(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"dblab", "unknown tool"},
+		{"mailpit,mailpit", "duplicate"},
+		{"mailpit,", "empty name"},
+		{",mailpit", "empty name"},
+		{"  ", "empty list"},
+	}
+	for _, tc := range cases {
+		_, err := ParseTools(tc.raw)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("ParseTools(%q) = %v, want substring %q", tc.raw, err, tc.want)
+		}
+	}
+}
+
+func TestParseToolsOmitted(t *testing.T) {
+	got, err := ParseTools("")
+	if err != nil || got != nil {
+		t.Fatalf("got %#v err %v", got, err)
+	}
+}
